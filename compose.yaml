@@ -12,6 +12,10 @@ services:
 
     # Restart the container unless manually stopped
     restart: unless-stopped
+    
+    # Maximum resources allowed for the database
+    cpus: "1.00"
+    mem_limit: 768m
 
     # Load database credentials from the root .env file
     environment:
@@ -32,7 +36,7 @@ services:
       timeout: 5s
       retries: 10
       start_period: 30s
-      
+
   
   # Node.js Express backend service
   backend:
@@ -46,6 +50,10 @@ services:
 
     # Restart automatically unless manually stopped
     restart: unless-stopped
+
+    # Maximum resources allowed for Node.js
+    cpus: "1.00"
+    mem_limit: 256m
 
     # Publish backend port 3200 to localhost only
     ports:
@@ -77,6 +85,10 @@ services:
     # Restart automatically unless manually stopped
     restart: unless-stopped
 
+    # Maximum resources allowed for Nginx
+    cpus: "0.50"
+    mem_limit: 128m
+    
     # Publish Nginx port 80 on localhost port 8080
     ports:
       - "127.0.0.1:8080:80"
