@@ -1,0 +1,91 @@
+
+# Docker Compose configuration for our multi-tier POC
+services:
+
+  # MySQL database service
+  mysql:
+    # Use MySQL 8.0 to match our existing SQL schema
+    image: mysql:8.0
+
+    # Give the container a recognizable name
+    container_name: poc-mysql
+
+    # Restart the container unless manually stopped
+    restart: unless-stopped
+
+    # Load database credentials from the root .env file
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: react_node_app
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+
+    # Store database files persistently and initialize sample data
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./backend/db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+
+    # Check whether MySQL is ready to accept connections
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+      
+  
+  # Node.js Express backend service
+  backend:
+    # Build the image using backend/Dockerfile
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+
+    # Name the backend container
+    container_name: poc-backend
+
+    # Restart automatically unless manually stopped
+    restart: unless-stopped
+
+    # Publish backend port 3200 to localhost only
+    ports:
+      - "127.0.0.1:3200:3200"
+
+    # Pass database connection settings to the backend
+    environment:
+      PORT: 3200
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: react_node_app
+
+    # Wait for MySQL to become healthy before starting
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+
+  # React frontend served by Nginx
+  frontend:
+    # Use the frontend image we already built
+    image: multi-tier-frontend:v1
+
+    # Give the container a recognizable name
+    container_name: poc-frontend
+
+    # Restart automatically unless manually stopped
+    restart: unless-stopped
+
+    # Publish Nginx port 80 on localhost port 8080
+    ports:
+      - "127.0.0.1:8080:80"
+
+    # Start the backend before the frontend
+    depends_on:
+      - backend
+
+# Named volume keeps MySQL data when the container is recreated
+volumes:
+  mysql_data:
+

@@ -1,0 +1,24 @@
+
+# Exclude locally installed Node.js dependencies
+# Dependencies will be installed inside Docker using npm ci
+node_modules
+npm-debug.log*
+
+# Exclude environment files containing configuration or secrets
+.env
+.env.*
+!.env.example
+
+# Exclude Git repository metadata
+.git
+.gitignore
+
+# Exclude local logs and temporary files
+logs
+*.log
+tmp
+temp
+
+# Exclude Docker build configuration files from the image
+Dockerfile
+.dockerignore

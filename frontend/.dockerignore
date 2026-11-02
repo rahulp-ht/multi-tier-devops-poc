@@ -1,0 +1,26 @@
+
+# Exclude locally installed Node.js dependencies
+node_modules
+
+# Exclude existing frontend build output
+dist
+
+# Exclude local environment files
+.env
+.env.*
+!.env.example
+
+# Exclude Git metadata
+.git
+.gitignore
+
+# Exclude logs and temporary files
+npm-debug.log*
+*.log
+tmp
+temp
+
+# Exclude Docker configuration files from the image
+Dockerfile
+.dockerignore
+
