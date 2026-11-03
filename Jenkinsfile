@@ -20,12 +20,16 @@ pipeline {
             }
         }
 
-        stage('Build') {
-            steps {
-                echo 'Build stage placeholder'
+         stage('Docker Verification') {
+             steps {
+                 echo 'Checking Docker Engine and Swarm access...'
+                    sh '''
+                       docker --version
+                       docker info --format 'Swarm Status: {{.Swarm.LocalNodeState}}'
+                       docker node ls
+                       '''
             }
         }
-
         stage('Test') {
             steps {
                 echo 'Test stage placeholder'

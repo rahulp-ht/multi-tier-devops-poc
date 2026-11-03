@@ -1,16 +1,22 @@
 services:
   jenkins:
-    image: jenkins/jenkins:lts
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: jenkins-poc:docker
     container_name: jenkins-poc
     restart: unless-stopped
 
     ports:
       - "127.0.0.1:8080:8080"
 
+    group_add:
+      - "${DOCKER_GID}"
+
     volumes:
       - jenkins_home:/var/jenkins_home
+      - /var/run/docker.sock:/var/run/docker.sock
 
 volumes:
   jenkins_home:
     name: jenkins_poc_home
-
