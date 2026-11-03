@@ -56,6 +56,12 @@ services:
       restart_policy:
         condition: on-failure
 
+      update_config:
+        parallelism: 1
+        order: start-first
+        monitor: 30s
+        failure_action: rollback
+
   frontend:
     image: multi-tier-frontend:v2
     ports:
@@ -77,8 +83,11 @@ services:
         parallelism: 1
         delay: 10s
         order: start-first
+        monitor: 30s
+        failure_action: rollback
       restart_policy:
         condition: on-failure
+
 
 networks:
   poc_network:
