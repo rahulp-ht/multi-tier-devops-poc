@@ -1,0 +1,96 @@
+services:
+  mysql:
+    image: mysql:8.0
+
+    environment:
+      MYSQL_DATABASE: react_node_app
+      MYSQL_USER: ${DB_USER}
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/poc_mysql_root_password
+      MYSQL_PASSWORD_FILE: /run/secrets/poc_db_password
+
+    secrets:
+      - poc_mysql_root_password
+      - poc_db_password
+
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+    networks:
+      - poc_network
+
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: "1.00"
+          memory: 768M
+      restart_policy:
+        condition: on-failure
+
+  backend:
+    image: multi-tier-backend:v1
+
+    environment:
+      PORT: "3200"
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_USER: ${DB_USER}
+      DB_PASSWORD_FILE: /run/secrets/poc_db_password
+      DB_NAME: react_node_app
+
+    secrets:
+      - poc_db_password
+
+    networks:
+      - poc_network
+
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: "1.00"
+          memory: 256M
+      restart_policy:
+        condition: on-failure
+
+  frontend:
+    image: multi-tier-frontend:v2
+    ports:
+      - target: 80
+        published: 8081
+        protocol: tcp
+        mode: ingress
+
+    networks:
+      - poc_network
+
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 128M
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+      restart_policy:
+        condition: on-failure
+
+networks:
+  poc_network:
+    driver: overlay
+
+volumes:
+  mysql_data:
+    external: true
+    name: lirw-react-node-mysql-app_mysql_data
+
+secrets:
+  poc_mysql_root_password:
+    external: true
+  poc_db_password:
+    external: true
