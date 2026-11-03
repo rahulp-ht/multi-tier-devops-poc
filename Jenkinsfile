@@ -30,9 +30,24 @@ pipeline {
                        '''
             }
         }
-        stage('Test') {
+        stage('Build Backend Image') {
+                steps {
+                    sh '''
+                    docker build \
+                    -t multi-tier-backend:ci-${BUILD_NUMBER} \
+                    ./backend
+                    '''
+            }
+        }
+
+        stage('Build Frontend Image') {
             steps {
-                echo 'Test stage placeholder'
+                sh '''
+                    docker build \
+                    --build-arg VITE_API_URL=/api \
+                    -t multi-tier-frontend:ci-${BUILD_NUMBER} \
+                    ./frontend
+                '''
             }
         }
     }
