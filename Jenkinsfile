@@ -250,6 +250,10 @@ pipeline {
         }
 
         stage('Deploy to Docker Swarm') {
+          when {
+                expression { !params.SCAN_ONLY }
+               }
+
             steps {
                 sh '''
                     set -eu
@@ -268,6 +272,9 @@ pipeline {
         }
 
         stage('Verify Deployment') {
+          when {
+              expression { !params.SCAN_ONLY }
+            }
             steps {
                 sh '''
                     set -eu
