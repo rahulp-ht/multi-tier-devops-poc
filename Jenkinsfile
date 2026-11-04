@@ -214,6 +214,7 @@ pipeline {
 
                     docker run --rm \
                       --user "$(id -u):$(id -g)" \
+                      --group-add "$(stat -c '%g' /var/run/docker.sock)" \
                       -v /var/run/docker.sock:/var/run/docker.sock \
                       -v "${JENKINS_VOLUME}:/jenkins" \
                       -v trivy_cache:/tmp/trivy-cache \
@@ -235,6 +236,7 @@ pipeline {
 
                     docker run --rm \
                       --user "$(id -u):$(id -g)" \
+                      --group-add "$(stat -c '%g' /var/run/docker.sock)" \
                       -v /var/run/docker.sock:/var/run/docker.sock \
                       -v "${JENKINS_VOLUME}:/jenkins" \
                       -v trivy_cache:/tmp/trivy-cache \
