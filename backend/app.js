@@ -17,7 +17,13 @@ db.connect((err) => {
    }
    console.log('Connected to MySQL Database');
 });
-
+// Health check for AWS Application Load Balancer
+app.get('/health', (req, res) => {
+  res.status(200).json({
+    status: 'healthy',
+    service: 'backend'
+  });
+});
 // Add your routes here
 app.use('/api', routes);
 
