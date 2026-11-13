@@ -49,7 +49,73 @@ pipeline {
                     ./frontend
                 '''
             }
+
+       }
+
+        stage('Build ECS Images') {
+            steps {
+                sh '''
+                    set -eu
+
+                    IMAGE_TAG=$(git rev-parse HEAD)
+
+                    docker build \
+                      -t multi-tier-backend:ecs-${IMAGE_TAG} \
+                      ./backend
+
+                    docker build \
+                      -f frontend/Dockerfile.ecs \
+                      --build-arg VITE_API_URL=/api \
+                      -t multi-tier-frontend:ecs-${IMAGE_TAG} \
+                      ./frontend
+                '''
+            }
         }
+
+        stage('Push Images to Amazon ECR') {
+            steps {
+                withCredentials([
+                    aws(
+                        credentialsId: 'aws-ecr-credentials',
+                        accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+                        secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
+                    )
+                ]) {
+
+sh '''#!/usr/bin/bash
+    set -euo pipefail
+    set +x
+    REGION=ap-south-1
+    REGISTRY=809554586055.dkr.ecr.ap-south-1.amazonaws.com
+    IMAGE_TAG=$(git rev-parse HEAD)
+
+    export DOCKER_CONFIG="$(mktemp -d)"
+    trap 'docker logout "$REGISTRY" >/dev/null 2>&1 || true; rm -rf "$DOCKER_CONFIG"' EXIT
+
+    docker run --rm \
+      -e AWS_ACCESS_KEY_ID \
+      -e AWS_SECRET_ACCESS_KEY \
+      -e AWS_DEFAULT_REGION="$REGION" \
+      public.ecr.aws/aws-cli/aws-cli:latest \
+      ecr get-login-password --region "$REGION" |
+      docker login \
+        --username AWS \
+        --password-stdin "$REGISTRY"
+
+    docker tag \
+      "multi-tier-backend:ecs-${IMAGE_TAG}" \
+      "$REGISTRY/multi-tier-poc/backend:$IMAGE_TAG"
+
+    docker tag \
+      "multi-tier-frontend:ecs-${IMAGE_TAG}" \
+      "$REGISTRY/multi-tier-poc/frontend:$IMAGE_TAG"
+
+    docker push "$REGISTRY/multi-tier-poc/backend:$IMAGE_TAG"
+    docker push "$REGISTRY/multi-tier-poc/frontend:$IMAGE_TAG"
+'''
+            }
+        }
+
         stage('Deploy to Docker Swarm') {
             steps {
                 echo 'Deploying frontend and backend to local Docker Swarm...'
