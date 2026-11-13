@@ -16,68 +16,84 @@ pipeline {
         ECR_PREFIX = 'multi-tier-poc'
         ECS_CLUSTER = 'multi-tier-poc-cluster'
         AWS_CLI_IMAGE = 'public.ecr.aws/aws-cli/aws-cli:latest'
-        IMAGE_TAG = ''
     }
 
     stages {
+
         stage('Checkout') {
-    steps {
-        checkout scm
+            steps {
+                checkout scm
 
-        script {
-            def commitSha = sh(
-                script: 'git rev-parse HEAD',
-                returnStdout: true
-            ).trim()
+                script {
+                    def commitSha = sh(
+                        script: 'git rev-parse HEAD',
+                        returnStdout: true
+                    ).trim()
 
-            if (!(commitSha ==~ /^[0-9a-f]{40}$/)) {
-                error("Invalid Git commit SHA: ${commitSha}")
+                    if (!(commitSha ==~ /^[0-9a-f]{40}$/)) {
+                        error("Invalid Git SHA: ${commitSha}")
+                    }
+
+                    env.IMAGE_TAG = commitSha
+                    echo "Building commit: ${commitSha}"
+                }
             }
-
-            env.IMAGE_TAG = commitSha
-            echo "Building commit: ${env.IMAGE_TAG}"
         }
-    }
-}
+
         stage('Verify Repository') {
             steps {
                 sh '''
                     set -eu
+
                     test -f backend/Dockerfile
                     test -f frontend/Dockerfile
                     test -f scripts/deploy-ecs-frontend.sh
                     test -f scripts/deploy-ecs-backend.sh
                     test -f swarm-stack.yaml
+
+                    test -n "$IMAGE_TAG"
+
                     docker version
                     git --version
                 '''
             }
         }
 
-        stage('Validate Application') {
-            steps {
-                sh '''
-                    set -eu
-                    docker run --rm \
-                      -v "$PWD/backend:/app" \
-                      -w /app \
-                      node:22-alpine \
-                      node --check server.js
 
-                    bash -n scripts/deploy-ecs-frontend.sh
-                    bash -n scripts/deploy-ecs-backend.sh
-                '''
-            }
-        }
+stage('Validate Application') {
+    steps {
+        sh '''
+            set -eu
+
+            echo "Validating deployment scripts..."
+
+            bash -n scripts/deploy-ecs-frontend.sh
+            bash -n scripts/deploy-ecs-backend.sh
+
+            echo "Validating backend JavaScript syntax..."
+
+            test -f backend/server.js
+
+            docker run --rm -i node:22-alpine \
+              node --check < backend/server.js
+
+            echo "Application validation successful."
+        '''
+    }
+}
 
         stage('Build ECS Images') {
             steps {
                 sh '''
                     set -eu
 
+                    echo "Building backend image..."
+
                     docker build \
                       -t "$AWS_REGISTRY/$ECR_PREFIX/backend:$IMAGE_TAG" \
                       ./backend
+
+                    echo "Building frontend image..."
 
                     docker build \
                       -f frontend/Dockerfile \
@@ -101,10 +117,9 @@ pipeline {
                         set -eu
                         set +x
 
-                        AWS_CONFIG_DIR="$(mktemp -d)"
                         DOCKER_CONFIG="$(mktemp -d)"
                         export DOCKER_CONFIG
-                        trap 'rm -rf "$AWS_CONFIG_DIR" "$DOCKER_CONFIG"' EXIT
+                        trap 'rm -rf "$DOCKER_CONFIG"' EXIT
 
                         aws_cli() {
                             docker run --rm \
@@ -115,27 +130,39 @@ pipeline {
                               "$AWS_CLI_IMAGE" "$@"
                         }
 
+                        echo "Logging in to Amazon ECR..."
+
                         aws_cli ecr get-login-password |
                           docker login \
                             --username AWS \
                             --password-stdin "$AWS_REGISTRY"
 
                         for SERVICE in backend frontend; do
+
                             REPO="$ECR_PREFIX/$SERVICE"
                             IMAGE="$AWS_REGISTRY/$REPO:$IMAGE_TAG"
 
-                            echo "Checking ECR: $IMAGE"
+                            echo "Checking ECR image: $IMAGE"
 
                             if aws_cli ecr describe-images \
                                 --repository-name "$REPO" \
                                 --image-ids "imageTag=$IMAGE_TAG" \
                                 >/dev/null 2>&1; then
 
-                                echo "Image already exists; skipping push: $SERVICE"
+                                echo "Image already exists: $SERVICE"
+                                echo "Skipping immutable image push."
+
                             else
+                                echo "Checking ECR repository access..."
+
+                                aws_cli ecr describe-repositories \
+                                  --repository-names "$REPO" \
+                                  >/dev/null
+
                                 echo "Pushing $SERVICE image..."
                                 docker push "$IMAGE"
                             fi
+
                         done
                     '''
                 }
@@ -154,6 +181,9 @@ pipeline {
                     sh '''
                         set -eu
                         set +x
+
+                        echo "Deploying backend to AWS ECS..."
+
                         bash scripts/deploy-ecs-backend.sh
                     '''
                 }
@@ -172,6 +202,9 @@ pipeline {
                     sh '''
                         set -eu
                         set +x
+
+                        echo "Deploying frontend to AWS ECS..."
+
                         bash scripts/deploy-ecs-frontend.sh
                     '''
                 }
@@ -192,6 +225,7 @@ pipeline {
                         set +x
 
                         for SERVICE in backend frontend; do
+
                             EXPECTED="$AWS_REGISTRY/$ECR_PREFIX/$SERVICE:$IMAGE_TAG"
 
                             TASK_ARN="$(docker run --rm \
@@ -206,6 +240,9 @@ pipeline {
                               --query 'services[0].taskDefinition' \
                               --output text)"
 
+                            test -n "$TASK_ARN"
+                            test "$TASK_ARN" != "None"
+
                             ACTUAL="$(docker run --rm \
                               -e AWS_ACCESS_KEY_ID \
                               -e AWS_SECRET_ACCESS_KEY \
@@ -218,7 +255,14 @@ pipeline {
                               --output text)"
 
                             echo "$SERVICE deployed image: $ACTUAL"
-                            test "$ACTUAL" = "$EXPECTED"
+
+                            if [ "$ACTUAL" != "$EXPECTED" ]; then
+                                echo "ERROR: ECS image mismatch for $SERVICE"
+                                exit 1
+                            fi
+
+                            echo "$SERVICE image verified."
+
                         done
                     '''
                 }
@@ -229,8 +273,14 @@ pipeline {
             steps {
                 sh '''
                     set -eu
-                    docker info --format '{{.Swarm.LocalNodeState}}' |
+
+                    echo "Checking Docker Swarm..."
+
+                    docker info \
+                      --format '{{.Swarm.LocalNodeState}}' |
                       grep -qx active
+
+                    echo "Deploying Docker Swarm stack..."
 
                     docker stack deploy \
                       -c swarm-stack.yaml \
@@ -243,8 +293,12 @@ pipeline {
             steps {
                 sh '''
                     set -eu
+
+                    echo "Docker Swarm services:"
                     docker stack services multi-tier-poc
-                    echo "ECS images verified and Swarm deployment submitted."
+
+                    echo "ECS image verification completed."
+                    echo "Docker Swarm deployment submitted."
                 '''
             }
         }
@@ -254,9 +308,11 @@ pipeline {
         success {
             echo "CI/CD SUCCESS: ${env.IMAGE_TAG}"
         }
+
         failure {
             echo 'CI/CD FAILED: Check Jenkins console output.'
         }
+
         always {
             echo 'Pipeline finished.'
         }
