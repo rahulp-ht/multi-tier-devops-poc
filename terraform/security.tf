@@ -153,3 +153,31 @@ resource "aws_vpc_security_group_egress_rule" "backend_https" {
   to_port     = 443
   ip_protocol = "tcp"
 }
+# Allow ECS EC2 host to initialize the private RDS database.
+# Remove this rule after database initialization.
+resource "aws_vpc_security_group_ingress_rule" "rds_from_ecs_instance" {
+  count = var.enable_rds && var.enable_ecs_capacity ? 1 : 0
+
+  security_group_id            = aws_security_group.rds.id
+  referenced_security_group_id = aws_security_group.ecs_instance.id
+
+  from_port   = 3306
+  to_port     = 3306
+  ip_protocol = "tcp"
+
+  description = "Temporary MySQL access for database initialization"
+}
+# Temporary outbound MySQL access for database initialization.
+# Remove after database initialization.
+resource "aws_vpc_security_group_egress_rule" "ecs_instance_to_rds" {
+  count = var.enable_rds && var.enable_ecs_capacity ? 1 : 0
+
+  security_group_id            = aws_security_group.ecs_instance.id
+  referenced_security_group_id = aws_security_group.rds.id
+
+  from_port   = 3306
+  to_port     = 3306
+  ip_protocol = "tcp"
+
+  description = "Temporary MySQL access for RDS initialization"
+}
