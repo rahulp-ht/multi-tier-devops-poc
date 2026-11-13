@@ -1,5 +1,6 @@
 variable "aws_region" {
 
+
   description = "AWS deployment region"
   type        = string
   default     = "ap-south-1"
@@ -57,4 +58,8 @@ variable "enable_ecs_services" {
     )
     error_message = "ECS services require tasks, EC2 capacity, ALB, RDS and VPC endpoints."
   }
+}
+variable "ecs_image_tag" {
+  description = "Git commit SHA used for frontend and backend ECS images"
+  type        = string
 }

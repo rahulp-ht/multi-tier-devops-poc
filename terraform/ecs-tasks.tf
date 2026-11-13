@@ -30,7 +30,7 @@ resource "aws_ecs_task_definition" "frontend" {
   container_definitions = jsonencode([
     {
       name      = "frontend"
-      image     = "${aws_ecr_repository.app["frontend"].repository_url}:v1"
+      image     = "${aws_ecr_repository.app["frontend"].repository_url}:${var.ecs_image_tag}"
       essential = true
 
       cpu               = 256
@@ -69,7 +69,7 @@ resource "aws_ecs_task_definition" "backend" {
   container_definitions = jsonencode([
     {
       name      = "backend"
-      image     = "${aws_ecr_repository.app["backend"].repository_url}:v1"
+      image     = "${aws_ecr_repository.app["backend"].repository_url}:${var.ecs_image_tag}"
       essential = true
 
       cpu               = 512
