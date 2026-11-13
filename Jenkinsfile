@@ -21,18 +21,24 @@ pipeline {
 
     stages {
         stage('Checkout') {
-            steps {
-                checkout scm
-                script {
-                    env.IMAGE_TAG = sh(
-                        script: 'git rev-parse HEAD',
-                        returnStdout: true
-                    ).trim()
-                }
-                echo "Building commit: ${env.IMAGE_TAG}"
-            }
-        }
+    steps {
+        checkout scm
 
+        script {
+            def commitSha = sh(
+                script: 'git rev-parse HEAD',
+                returnStdout: true
+            ).trim()
+
+            if (!(commitSha ==~ /^[0-9a-f]{40}$/)) {
+                error("Invalid Git commit SHA: ${commitSha}")
+            }
+
+            env.IMAGE_TAG = commitSha
+            echo "Building commit: ${env.IMAGE_TAG}"
+        }
+    }
+}
         stage('Verify Repository') {
             steps {
                 sh '''
@@ -41,7 +47,7 @@ pipeline {
                     test -f frontend/Dockerfile
                     test -f scripts/deploy-ecs-frontend.sh
                     test -f scripts/deploy-ecs-backend.sh
-                    test -f swarm-stack.yml
+                    test -f swarm-stack.yaml
                     docker version
                     git --version
                 '''
@@ -227,7 +233,7 @@ pipeline {
                       grep -qx active
 
                     docker stack deploy \
-                      -c swarm-stack.yml \
+                      -c swarm-stack.yaml \
                       multi-tier-poc
                 '''
             }
