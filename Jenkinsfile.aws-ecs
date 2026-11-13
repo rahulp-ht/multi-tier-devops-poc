@@ -1,0 +1,285 @@
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        timeout(time: 60, unit: 'MINUTES')
+        skipDefaultCheckout(true)
+    }
+
+    environment {
+        AWS_REGION = 'ap-south-1'
+        AWS_ACCOUNT_ID = '809554586055'
+        AWS_REGISTRY = '809554586055.dkr.ecr.ap-south-1.amazonaws.com'
+        ECR_PREFIX = 'multi-tier-poc'
+        ECS_CLUSTER = 'multi-tier-poc-cluster'
+        AWS_CLI_IMAGE = 'public.ecr.aws/aws-cli/aws-cli:latest'
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+
+                script {
+                    def commitSha = sh(
+                        script: 'git rev-parse HEAD',
+                        returnStdout: true
+                    ).trim()
+
+                    if (!(commitSha ==~ /^[0-9a-f]{40}$/)) {
+                        error("Invalid Git SHA: ${commitSha}")
+                    }
+
+                    env.IMAGE_TAG = commitSha
+                    echo "Building commit: ${commitSha}"
+                }
+            }
+        }
+
+        stage('Verify Repository') {
+            steps {
+                sh '''
+                    set -eu
+
+                    test -f backend/Dockerfile
+                    test -f frontend/Dockerfile
+                    test -f scripts/deploy-ecs-frontend.sh
+                    test -f scripts/deploy-ecs-backend.sh
+
+                    test -n "$IMAGE_TAG"
+
+                    docker version
+                    git --version
+                '''
+            }
+        }
+
+
+stage('Validate Application') {
+    steps {
+        sh '''
+            set -eu
+
+            echo "Validating deployment scripts..."
+
+            bash -n scripts/deploy-ecs-frontend.sh
+            bash -n scripts/deploy-ecs-backend.sh
+
+            echo "Validating backend JavaScript syntax..."
+
+            test -f backend/server.js
+
+            docker run --rm -i node:22-alpine \
+              node --check < backend/server.js
+
+            echo "Application validation successful."
+        '''
+    }
+}
+
+        stage('Build ECS Images') {
+            steps {
+                sh '''
+                    set -eu
+
+                    echo "Building backend image..."
+
+                    docker build \
+                      -t "$AWS_REGISTRY/$ECR_PREFIX/backend:$IMAGE_TAG" \
+                      ./backend
+
+                    echo "Building frontend image..."
+
+                    docker build \
+                      -f frontend/Dockerfile \
+                      --build-arg VITE_API_URL=/api \
+                      -t "$AWS_REGISTRY/$ECR_PREFIX/frontend:$IMAGE_TAG" \
+                      ./frontend
+                '''
+            }
+        }
+
+        stage('Push Images to Amazon ECR') {
+            steps {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: 'aws-ecr-credentials',
+                        accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+                        secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
+                    ]
+                ]) {
+                    sh '''
+                        set -eu
+                        set +x
+
+                        DOCKER_CONFIG="$(mktemp -d)"
+                        export DOCKER_CONFIG
+                        trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+
+                        aws_cli() {
+                            docker run --rm \
+                              -e AWS_ACCESS_KEY_ID \
+                              -e AWS_SECRET_ACCESS_KEY \
+                              -e AWS_SESSION_TOKEN \
+                              -e AWS_DEFAULT_REGION="$AWS_REGION" \
+                              "$AWS_CLI_IMAGE" "$@"
+                        }
+
+                        echo "Logging in to Amazon ECR..."
+
+                        aws_cli ecr get-login-password |
+                          docker login \
+                            --username AWS \
+                            --password-stdin "$AWS_REGISTRY"
+
+                        for SERVICE in backend frontend; do
+
+                            REPO="$ECR_PREFIX/$SERVICE"
+                            IMAGE="$AWS_REGISTRY/$REPO:$IMAGE_TAG"
+
+                            echo "Checking ECR image: $IMAGE"
+
+                            if aws_cli ecr describe-images \
+                                --repository-name "$REPO" \
+                                --image-ids "imageTag=$IMAGE_TAG" \
+                                >/dev/null 2>&1; then
+
+                                echo "Image already exists: $SERVICE"
+                                echo "Skipping immutable image push."
+
+                            else
+                                echo "Checking ECR repository access..."
+
+                                aws_cli ecr describe-repositories \
+                                  --repository-names "$REPO" \
+                                  >/dev/null
+
+                                echo "Pushing $SERVICE image..."
+                                docker push "$IMAGE"
+                            fi
+
+                        done
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy Backend to AWS ECS') {
+            steps {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: 'aws-ecr-credentials',
+                        accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+                        secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
+                    ]
+                ]) {
+                    sh '''
+                        set -eu
+                        set +x
+
+                        echo "Deploying backend to AWS ECS..."
+
+                        bash scripts/deploy-ecs-backend.sh
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy Frontend to AWS ECS') {
+            steps {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: 'aws-ecr-credentials',
+                        accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+                        secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
+                    ]
+                ]) {
+                    sh '''
+                        set -eu
+                        set +x
+
+                        echo "Deploying frontend to AWS ECS..."
+
+                        bash scripts/deploy-ecs-frontend.sh
+                    '''
+                }
+            }
+        }
+
+        stage('Verify ECS Deployment') {
+            steps {
+                withCredentials([
+                    [$class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: 'aws-ecr-credentials',
+                        accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+                        secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
+                    ]
+                ]) {
+                    sh '''
+                        set -eu
+                        set +x
+
+                        for SERVICE in backend frontend; do
+
+                            EXPECTED="$AWS_REGISTRY/$ECR_PREFIX/$SERVICE:$IMAGE_TAG"
+
+                            TASK_ARN="$(docker run --rm \
+                              -e AWS_ACCESS_KEY_ID \
+                              -e AWS_SECRET_ACCESS_KEY \
+                              -e AWS_SESSION_TOKEN \
+                              -e AWS_DEFAULT_REGION="$AWS_REGION" \
+                              "$AWS_CLI_IMAGE" \
+                              ecs describe-services \
+                              --cluster "$ECS_CLUSTER" \
+                              --services "$ECR_PREFIX-$SERVICE" \
+                              --query 'services[0].taskDefinition' \
+                              --output text)"
+
+                            test -n "$TASK_ARN"
+                            test "$TASK_ARN" != "None"
+
+                            ACTUAL="$(docker run --rm \
+                              -e AWS_ACCESS_KEY_ID \
+                              -e AWS_SECRET_ACCESS_KEY \
+                              -e AWS_SESSION_TOKEN \
+                              -e AWS_DEFAULT_REGION="$AWS_REGION" \
+                              "$AWS_CLI_IMAGE" \
+                              ecs describe-task-definition \
+                              --task-definition "$TASK_ARN" \
+                              --query 'taskDefinition.containerDefinitions[0].image' \
+                              --output text)"
+
+                            echo "$SERVICE deployed image: $ACTUAL"
+
+                            if [ "$ACTUAL" != "$EXPECTED" ]; then
+                                echo "ERROR: ECS image mismatch for $SERVICE"
+                                exit 1
+                            fi
+
+                            echo "$SERVICE image verified."
+
+                        done
+                    '''
+                }
+            }
+        }
+
+    }
+
+    post {
+        success {
+            echo "CI/CD SUCCESS: ${env.IMAGE_TAG}"
+        }
+
+        failure {
+            echo 'CI/CD FAILED: Check Jenkins console output.'
+        }
+
+        always {
+            echo 'Pipeline finished.'
+        }
+    }
+}
