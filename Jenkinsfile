@@ -116,6 +116,35 @@ sh '''#!/usr/bin/bash
             }
         }
      }
+     stage('Deploy Frontend to AWS ECS') {
+       when {
+    expression {
+        env.GIT_BRANCH == 'origin/main' ||
+        env.GIT_BRANCH == 'main'
+    }
+}
+       steps {
+
+        withCredentials([
+            aws(
+                credentialsId: 'aws-ecr-credentials',
+                accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+                secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
+            )
+        ]) {
+            sh '''#!/usr/bin/bash
+                set -euo pipefail
+                set +x
+
+                export IMAGE_TAG="$(git rev-parse HEAD)"
+
+                echo "Deploying frontend image: $IMAGE_TAG"
+
+                bash scripts/deploy-ecs-frontend.sh
+            '''
+        }
+    }
+}
 
         stage('Deploy to Docker Swarm') {
             steps {
