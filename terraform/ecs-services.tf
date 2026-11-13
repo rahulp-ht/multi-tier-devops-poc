@@ -34,6 +34,9 @@ resource "aws_ecs_service" "frontend" {
     aws_lb_listener.http,
     aws_ecs_cluster_capacity_providers.main
   ]
+  lifecycle {
+    ignore_changes = [task_definition]
+  }
 }
 
 resource "aws_ecs_service" "backend" {
@@ -50,6 +53,9 @@ resource "aws_ecs_service" "backend" {
   capacity_provider_strategy {
     capacity_provider = aws_ecs_capacity_provider.ec2[0].name
     weight            = 1
+  }
+  lifecycle {
+    ignore_changes = [task_definition]
   }
 
   network_configuration {

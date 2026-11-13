@@ -1,0 +1,51 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "RegisterTaggedPocTaskDefinitions",
+      "Effect": "Allow",
+      "Action": "ecs:RegisterTaskDefinition",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/Project": "multi-tier-poc"
+        }
+      }
+    },
+    {
+      "Sid": "DescribePocTaskDefinitions",
+      "Effect": "Allow",
+      "Action": "ecs:DescribeTaskDefinition",
+      "Resource": [
+        "arn:aws:ecs:ap-south-1:809554586055:task-definition/multi-tier-poc-frontend:*",
+        "arn:aws:ecs:ap-south-1:809554586055:task-definition/multi-tier-poc-backend:*"
+      ]
+    },
+    {
+      "Sid": "UpdatePocServices",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:UpdateService",
+        "ecs:DescribeServices"
+      ],
+      "Resource": [
+        "arn:aws:ecs:ap-south-1:809554586055:service/multi-tier-poc-cluster/multi-tier-poc-frontend",
+        "arn:aws:ecs:ap-south-1:809554586055:service/multi-tier-poc-cluster/multi-tier-poc-backend"
+      ]
+    },
+    {
+      "Sid": "PassPocTaskRoles",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": [
+        "arn:aws:iam::809554586055:role/multi-tier-poc-ecs-execution-role",
+        "arn:aws:iam::809554586055:role/multi-tier-poc-ecs-task-role"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "ecs-tasks.amazonaws.com"
+        }
+      }
+    }
+  ]
+}
