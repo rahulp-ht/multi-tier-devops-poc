@@ -12,18 +12,15 @@
         }
       }
     },
-    {
+        {
       "Sid": "DescribePocTaskDefinitions",
       "Effect": "Allow",
       "Action": "ecs:DescribeTaskDefinition",
-      "Resource": [
-        "arn:aws:ecs:ap-south-1:809554586055:task-definition/multi-tier-poc-frontend:*",
-        "arn:aws:ecs:ap-south-1:809554586055:task-definition/multi-tier-poc-backend:*"
-      ]
+      "Resource": "*"
     },
     {
-      "Sid": "UpdatePocServices",
-      "Effect": "Allow",
+      "Sid": "UpdatePocServices",  
+    "Effect": "Allow",
       "Action": [
         "ecs:UpdateService",
         "ecs:DescribeServices"
