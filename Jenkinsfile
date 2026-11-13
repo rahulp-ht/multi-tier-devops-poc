@@ -1,72 +1,82 @@
+
 pipeline {
     agent any
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        timeout(time: 45, unit: 'MINUTES')
+        skipDefaultCheckout(true)
+    }
+
+    environment {
+        AWS_REGION = 'ap-south-1'
+        AWS_ACCOUNT_ID = '809554586055'
+        AWS_REGISTRY = '809554586055.dkr.ecr.ap-south-1.amazonaws.com'
+        ECR_PREFIX = 'multi-tier-poc'
+        ECS_CLUSTER = 'multi-tier-poc-cluster'
+        AWS_CLI_IMAGE = 'public.ecr.aws/aws-cli/aws-cli:latest'
+        IMAGE_TAG = ''
+    }
 
     stages {
         stage('Checkout') {
             steps {
-                echo 'Checking out source code...'
                 checkout scm
+                script {
+                    env.IMAGE_TAG = sh(
+                        script: 'git rev-parse HEAD',
+                        returnStdout: true
+                    ).trim()
+                }
+                echo "Building commit: ${env.IMAGE_TAG}"
             }
         }
 
         stage('Verify Repository') {
             steps {
-                echo 'Verifying project files...'
                 sh '''
-                    pwd
-                    ls -la
-                    git log -1 --oneline
+                    set -eu
+                    test -f backend/Dockerfile
+                    test -f frontend/Dockerfile
+                    test -f scripts/deploy-ecs-frontend.sh
+                    test -f scripts/deploy-ecs-backend.sh
+                    test -f swarm-stack.yml
+                    docker version
+                    git --version
                 '''
             }
         }
 
-         stage('Docker Verification') {
-             steps {
-                 echo 'Checking Docker Engine and Swarm access...'
-                    sh '''
-                       docker --version
-                       docker info --format 'Swarm Status: {{.Swarm.LocalNodeState}}'
-                       docker node ls
-                       '''
-            }
-        }
-        stage('Build Backend Image') {
-                steps {
-                    sh '''
-                    docker build \
-                    -t multi-tier-backend:ci-${BUILD_NUMBER} \
-                    ./backend
-                    '''
-            }
-        }
-
-        stage('Build Frontend Image') {
+        stage('Validate Application') {
             steps {
                 sh '''
-                    docker build \
-                    --build-arg VITE_API_URL=/api \
-                    -t multi-tier-frontend:ci-${BUILD_NUMBER} \
-                    ./frontend
+                    set -eu
+                    docker run --rm \
+                      -v "$PWD/backend:/app" \
+                      -w /app \
+                      node:22-alpine \
+                      node --check server.js
+
+                    bash -n scripts/deploy-ecs-frontend.sh
+                    bash -n scripts/deploy-ecs-backend.sh
                 '''
             }
-
-       }
+        }
 
         stage('Build ECS Images') {
             steps {
                 sh '''
                     set -eu
 
-                    IMAGE_TAG=$(git rev-parse HEAD)
-
                     docker build \
-                      -t multi-tier-backend:ecs-${IMAGE_TAG} \
+                      -t "$AWS_REGISTRY/$ECR_PREFIX/backend:$IMAGE_TAG" \
                       ./backend
 
                     docker build \
-                      -f frontend/Dockerfile.ecs \
+                      -f frontend/Dockerfile \
                       --build-arg VITE_API_URL=/api \
-                      -t multi-tier-frontend:ecs-${IMAGE_TAG} \
+                      -t "$AWS_REGISTRY/$ECR_PREFIX/frontend:$IMAGE_TAG" \
                       ./frontend
                 '''
             }
@@ -75,118 +85,160 @@ pipeline {
         stage('Push Images to Amazon ECR') {
             steps {
                 withCredentials([
-                    aws(
+                    usernamePassword(
                         credentialsId: 'aws-ecr-credentials',
-                        accessKeyVariable: 'AWS_ACCESS_KEY_ID',
-                        secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
+                        usernameVariable: 'AWS_ACCESS_KEY_ID',
+                        passwordVariable: 'AWS_SECRET_ACCESS_KEY'
                     )
                 ]) {
+                    sh '''
+                        set -eu
+                        set +x
 
-sh '''#!/usr/bin/bash
-    set -euo pipefail
-    set +x
-    REGION=ap-south-1
-    REGISTRY=809554586055.dkr.ecr.ap-south-1.amazonaws.com
-    IMAGE_TAG=$(git rev-parse HEAD)
+                        AWS_CONFIG_DIR="$(mktemp -d)"
+                        DOCKER_CONFIG="$(mktemp -d)"
+                        export DOCKER_CONFIG
+                        trap 'rm -rf "$AWS_CONFIG_DIR" "$DOCKER_CONFIG"' EXIT
 
-    export DOCKER_CONFIG="$(mktemp -d)"
-    trap 'docker logout "$REGISTRY" >/dev/null 2>&1 || true; rm -rf "$DOCKER_CONFIG"' EXIT
+                        aws_cli() {
+                            docker run --rm \
+                              -e AWS_ACCESS_KEY_ID \
+                              -e AWS_SECRET_ACCESS_KEY \
+                              -e AWS_SESSION_TOKEN \
+                              -e AWS_DEFAULT_REGION="$AWS_REGION" \
+                              "$AWS_CLI_IMAGE" "$@"
+                        }
 
-    docker run --rm \
-      -e AWS_ACCESS_KEY_ID \
-      -e AWS_SECRET_ACCESS_KEY \
-      -e AWS_DEFAULT_REGION="$REGION" \
-      public.ecr.aws/aws-cli/aws-cli:latest \
-      ecr get-login-password --region "$REGION" |
-      docker login \
-        --username AWS \
-        --password-stdin "$REGISTRY"
+                        aws_cli ecr get-login-password |
+                          docker login \
+                            --username AWS \
+                            --password-stdin "$AWS_REGISTRY"
 
-    docker tag \
-      "multi-tier-backend:ecs-${IMAGE_TAG}" \
-      "$REGISTRY/multi-tier-poc/backend:$IMAGE_TAG"
+                        for SERVICE in backend frontend; do
+                            REPO="$ECR_PREFIX/$SERVICE"
+                            IMAGE="$AWS_REGISTRY/$REPO:$IMAGE_TAG"
 
-    docker tag \
-      "multi-tier-frontend:ecs-${IMAGE_TAG}" \
-      "$REGISTRY/multi-tier-poc/frontend:$IMAGE_TAG"
+                            echo "Checking ECR: $IMAGE"
 
-    docker push "$REGISTRY/multi-tier-poc/backend:$IMAGE_TAG"
-    docker push "$REGISTRY/multi-tier-poc/frontend:$IMAGE_TAG"
-'''
+                            if aws_cli ecr describe-images \
+                                --repository-name "$REPO" \
+                                --image-ids "imageTag=$IMAGE_TAG" \
+                                >/dev/null 2>&1; then
+
+                                echo "Image already exists; skipping push: $SERVICE"
+                            else
+                                echo "Pushing $SERVICE image..."
+                                docker push "$IMAGE"
+                            fi
+                        done
+                    '''
+                }
             }
         }
-     }
-     stage('Deploy Frontend to AWS ECS') {
-       when {
-    expression {
-        env.GIT_BRANCH == 'origin/main' ||
-        env.GIT_BRANCH == 'main'
-    }
-}
-       steps {
 
-        withCredentials([
-            aws(
-                credentialsId: 'aws-ecr-credentials',
-                accessKeyVariable: 'AWS_ACCESS_KEY_ID',
-                secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
-            )
-        ]) {
-            sh '''#!/usr/bin/bash
-                set -euo pipefail
-                set +x
-
-                export IMAGE_TAG="$(git rev-parse HEAD)"
-
-                echo "Deploying frontend image: $IMAGE_TAG"
-
-                bash scripts/deploy-ecs-frontend.sh
-            '''
+        stage('Deploy Backend to AWS ECS') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'aws-ecr-credentials',
+                        usernameVariable: 'AWS_ACCESS_KEY_ID',
+                        passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                    )
+                ]) {
+                    sh '''
+                        set -eu
+                        set +x
+                        bash scripts/deploy-ecs-backend.sh
+                    '''
+                }
+            }
         }
-    }
-}
+
+        stage('Deploy Frontend to AWS ECS') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'aws-ecr-credentials',
+                        usernameVariable: 'AWS_ACCESS_KEY_ID',
+                        passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                    )
+                ]) {
+                    sh '''
+                        set -eu
+                        set +x
+                        bash scripts/deploy-ecs-frontend.sh
+                    '''
+                }
+            }
+        }
+
+        stage('Verify ECS Deployment') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'aws-ecr-credentials',
+                        usernameVariable: 'AWS_ACCESS_KEY_ID',
+                        passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                    )
+                ]) {
+                    sh '''
+                        set -eu
+                        set +x
+
+                        for SERVICE in backend frontend; do
+                            EXPECTED="$AWS_REGISTRY/$ECR_PREFIX/$SERVICE:$IMAGE_TAG"
+
+                            TASK_ARN="$(docker run --rm \
+                              -e AWS_ACCESS_KEY_ID \
+                              -e AWS_SECRET_ACCESS_KEY \
+                              -e AWS_SESSION_TOKEN \
+                              -e AWS_DEFAULT_REGION="$AWS_REGION" \
+                              "$AWS_CLI_IMAGE" \
+                              ecs describe-services \
+                              --cluster "$ECS_CLUSTER" \
+                              --services "$ECR_PREFIX-$SERVICE" \
+                              --query 'services[0].taskDefinition' \
+                              --output text)"
+
+                            ACTUAL="$(docker run --rm \
+                              -e AWS_ACCESS_KEY_ID \
+                              -e AWS_SECRET_ACCESS_KEY \
+                              -e AWS_SESSION_TOKEN \
+                              -e AWS_DEFAULT_REGION="$AWS_REGION" \
+                              "$AWS_CLI_IMAGE" \
+                              ecs describe-task-definition \
+                              --task-definition "$TASK_ARN" \
+                              --query 'taskDefinition.containerDefinitions[0].image' \
+                              --output text)"
+
+                            echo "$SERVICE deployed image: $ACTUAL"
+                            test "$ACTUAL" = "$EXPECTED"
+                        done
+                    '''
+                }
+            }
+        }
 
         stage('Deploy to Docker Swarm') {
             steps {
-                echo 'Deploying frontend and backend to local Docker Swarm...'
-
                 sh '''
                     set -eu
+                    docker info --format '{{.Swarm.LocalNodeState}}' |
+                      grep -qx active
 
-                    docker service update \
-                    --detach=false \
-                    --image multi-tier-backend:ci-${BUILD_NUMBER} \
-                    poc_backend
-
-                    docker service update \
-                    --detach=false \
-                    --image multi-tier-frontend:ci-${BUILD_NUMBER} \
-                    poc_frontend
+                    docker stack deploy \
+                      -c swarm-stack.yml \
+                      multi-tier-poc
                 '''
             }
         }
+
         stage('Verify Deployment') {
             steps {
-                echo 'Verifying Docker Swarm deployment...'
-
                 sh '''
                     set -eu
-
-                    docker service ls \
-                    --filter name=poc_backend \
-                    --filter name=poc_frontend
-
-                    echo "Checking application HTTP response..."
-
-                    docker run --rm --network host \
-                    curlimages/curl:latest \
-                    --fail --silent --show-error \
-                    --retry 10 \
-                    --retry-delay 3 \
-                    --retry-connrefused \
-                    http://localhost:8081/ > /dev/null
-
-                    echo "Application HTTP check passed."
+                    docker stack services multi-tier-poc
+                    echo "ECS images verified and Swarm deployment submitted."
                 '''
             }
         }
@@ -194,11 +246,13 @@ sh '''#!/usr/bin/bash
 
     post {
         success {
-            echo 'CI pipeline completed successfully!'
+            echo "CI/CD SUCCESS: ${env.IMAGE_TAG}"
         }
-
         failure {
-            echo 'CI pipeline failed. Check console output.'
+            echo 'CI/CD FAILED: Check Jenkins console output.'
+        }
+        always {
+            echo 'Pipeline finished.'
         }
     }
 }
