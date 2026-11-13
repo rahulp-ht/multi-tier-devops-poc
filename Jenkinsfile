@@ -115,6 +115,7 @@ sh '''#!/usr/bin/bash
 '''
             }
         }
+     }
 
         stage('Deploy to Docker Swarm') {
             steps {
