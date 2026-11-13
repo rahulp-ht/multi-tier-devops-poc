@@ -75,8 +75,9 @@ resource "aws_iam_role_policy" "ecs_rds_secret" {
         Action = [
           "secretsmanager:GetSecretValue"
         ]
-        Resource = aws_db_instance.mysql[0].master_user_secret[0].secret_arn
+        Resource = aws_secretsmanager_secret.app_db[0].arn
       }
+
     ]
   })
 }

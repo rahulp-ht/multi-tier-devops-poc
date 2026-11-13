@@ -98,7 +98,7 @@ resource "aws_ecs_task_definition" "backend" {
         },
         {
           name  = "DB_USER"
-          value = "admin"
+          value = "poc_app"
         },
         {
           name  = "DB_NAME"
@@ -109,7 +109,7 @@ resource "aws_ecs_task_definition" "backend" {
       secrets = [
         {
           name      = "DB_PASSWORD"
-          valueFrom = "${aws_db_instance.mysql[0].master_user_secret[0].secret_arn}:password::"
+          valueFrom = aws_secretsmanager_secret.app_db[0].arn
         }
       ]
 

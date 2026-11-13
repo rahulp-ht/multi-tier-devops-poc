@@ -44,3 +44,15 @@ resource "aws_db_instance" "mysql" {
     Name = "${var.project_name}-mysql"
   }
 }
+# Application database credentials
+resource "aws_secretsmanager_secret" "app_db" {
+  count = var.enable_rds ? 1 : 0
+
+  name                    = "${var.project_name}/app-db"
+  description             = "Database credentials for the POC application"
+  recovery_window_in_days = 7
+
+  tags = {
+    Name = "${var.project_name}-app-db-secret"
+  }
+}
