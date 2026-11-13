@@ -12,6 +12,18 @@
         }
       }
     },
+    {
+  "Sid": "TagPocTaskDefinitionsOnCreate",
+  "Effect": "Allow",
+  "Action": "ecs:TagResource",
+  "Resource": "arn:aws:ecs:ap-south-1:809554586055:task-definition/multi-tier-poc-frontend:*",
+  "Condition": {
+    "StringEquals": {
+      "ecs:CreateAction": "RegisterTaskDefinition",
+      "aws:RequestTag/Project": "multi-tier-poc"
+    }
+  }
+},
         {
       "Sid": "DescribePocTaskDefinitions",
       "Effect": "Allow",
