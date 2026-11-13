@@ -84,11 +84,46 @@ aws_cli ecs update-service \
     --task-definition "$NEW_TASK_ARN" \
     --query 'service.{Name:serviceName,TaskDefinition:taskDefinition}' \
     --output table
+echo "Waiting for ECS frontend deployment to stabilize..."
 
-echo "Waiting for ECS deployment to stabilize..."
+STABLE=0
 
-aws_cli ecs wait services-stable \
-    --cluster "$CLUSTER" \
-    --services "$SERVICE"
+for ATTEMPT in $(seq 1 40); do
+    SERVICE_JSON=$(aws_cli ecs describe-services \
+        --cluster "$CLUSTER" \
+        --services "$SERVICE" \
+        --output json)
+
+    STATUS=$(echo "$SERVICE_JSON" | jq -r \
+        --arg TASK "$NEW_TASK_ARN" \
+        '.services[0].deployments[] | select(.taskDefinition == $TASK) | .rolloutState' | head -n 1)
+
+    RUNNING=$(echo "$SERVICE_JSON" | jq -r '.services[0].runningCount')
+    DESIRED=$(echo "$SERVICE_JSON" | jq -r '.services[0].desiredCount')
+    DEPLOYMENTS=$(echo "$SERVICE_JSON" | jq -r '.services[0].deployments | length')
+
+    echo "Attempt $ATTEMPT/40: rollout=$STATUS, running=$RUNNING/$DESIRED, deployments=$DEPLOYMENTS"
+
+    if [ "$STATUS" = "COMPLETED" ] &&
+       [ "$RUNNING" -eq "$DESIRED" ] &&
+       [ "$DEPLOYMENTS" -eq 1 ]; then
+        STABLE=1
+        break
+    fi
+
+    if [ "$STATUS" = "FAILED" ]; then
+        echo "ERROR: ECS frontend deployment failed."
+        exit 1
+    fi
+
+    if [ "$ATTEMPT" -lt 40 ]; then
+        sleep 30
+    fi
+done
+
+if [ "$STABLE" -ne 1 ]; then
+    echo "ERROR: ECS frontend deployment did not stabilize."
+    exit 1
+fi
 
 echo "ECS frontend deployment successful: $NEW_TASK_ARN"

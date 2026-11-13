@@ -83,11 +83,49 @@ aws_cli ecs update-service \
     --task-definition "$NEW_TASK_ARN" \
     --query 'service.{Name:serviceName,TaskDefinition:taskDefinition}' \
     --output table
+echo "Waiting for ECS deployment to stabilize (up to 20 minutes)..."
 
-echo "Waiting for ECS deployment to stabilize..."
+STABLE=0
 
-aws_cli ecs wait services-stable \
-    --cluster "$CLUSTER" \
-    --services "$SERVICE"
+for ATTEMPT in $(seq 1 40); do
+    STATUS=$(aws_cli ecs describe-services \
+        --cluster "$CLUSTER" \
+        --services "$SERVICE" \
+        --query 'services[0].deployments[0].rolloutState' \
+        --output text)
+
+    RUNNING=$(aws_cli ecs describe-services \
+        --cluster "$CLUSTER" \
+        --services "$SERVICE" \
+        --query 'services[0].runningCount' \
+        --output text)
+
+    ACTIVE_TASK=$(aws_cli ecs describe-services \
+        --cluster "$CLUSTER" \
+        --services "$SERVICE" \
+        --query 'services[0].taskDefinition' \
+        --output text)
+
+    echo "Attempt $ATTEMPT/40: rollout=$STATUS, running=$RUNNING"
+
+    if [ "$STATUS" = "COMPLETED" ] &&
+       [ "$RUNNING" -ge 1 ] &&
+       [ "$ACTIVE_TASK" = "$NEW_TASK_ARN" ]; then
+        STABLE=1
+        break
+    fi
+
+    if [ "$STATUS" = "FAILED" ]; then
+        echo "ERROR: ECS deployment failed."
+        exit 1
+    fi
+
+    sleep 30
+done
+
+if [ "$STABLE" -ne 1 ]; then
+    echo "ERROR: ECS backend did not stabilize within the timeout."
+    exit 1
+fi
 
 echo "ECS backend deployment successful: $NEW_TASK_ARN"
