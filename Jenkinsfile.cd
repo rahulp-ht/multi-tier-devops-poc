@@ -1,5 +1,4 @@
 import groovy.json.JsonOutput
-import groovy.json.JsonSlurperClassic
 pipeline {
     agent any
 
@@ -205,7 +204,7 @@ exec docker run --rm \\
                                       --cluster "$ECS_CLUSTER" --services "$SERVICE_NAME" \\
                                       --output json'''
                                 ).trim()
-                                def serviceData = new JsonSlurperClassic().parseText(serviceResult)
+                                def serviceData = readJSON text: serviceResult, returnPojo: true
                                 if (!serviceData.services || serviceData.services.size() != 1 ||
                                     serviceData.services[0].status != 'ACTIVE' ||
                                     (serviceData.services[0].desiredCount as int) < 1) {
@@ -217,7 +216,7 @@ exec docker run --rm \\
                                     sh(returnStdout: true, script: '''./aws-cli.sh ecs describe-task-definition \\
                                       --task-definition "$TASK_ARN" --include TAGS --output json''').trim()
                                 }
-                                def taskResult = new JsonSlurperClassic().parseText(taskJson)
+                                def taskResult = readJSON text: taskJson, returnPojo: true
                                 def oldTask = taskResult.taskDefinition
                                 def containers = oldTask.containerDefinitions
                                 def matches = containers.findAll { c ->
@@ -278,7 +277,8 @@ exec docker run --rm \\
                                 def afterJson = sh(returnStdout: true, script: '''./aws-cli.sh ecs describe-services \\
                                   --cluster "$ECS_CLUSTER" --services "$SERVICE_NAME" \\
                                   --output json''').trim()
-                                def after = new JsonSlurperClassic().parseText(afterJson).services[0]
+                                def afterData = readJSON text: afterJson, returnPojo: true
+                                def after = afterData.services[0]
                                 if ((after.runningCount as int) != (after.desiredCount as int) ||
                                     (after.desiredCount as int) < 1) {
                                     error("${serviceName} did not reach its desired running count")
@@ -288,8 +288,8 @@ exec docker run --rm \\
                                     sh(returnStdout: true, script: '''./aws-cli.sh ecs describe-task-definition \\
                                       --task-definition "$TASK_ARN" --output json''').trim()
                                 }
-                                def deployedContainers = new JsonSlurperClassic().parseText(deployedTaskJson)
-                                    .taskDefinition.containerDefinitions
+                                def deployedTaskData = readJSON text: deployedTaskJson, returnPojo: true
+                                def deployedContainers = deployedTaskData.taskDefinition.containerDefinitions
                                 if (!deployedContainers.any { c ->
                                     (c.name == matches[0].name) && c.image == targetImage
                                 }) {
