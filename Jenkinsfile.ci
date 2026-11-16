@@ -1,4 +1,3 @@
-
 pipeline {
     agent any
 
@@ -169,7 +168,32 @@ pipeline {
         }
 
         success {
-            echo 'CI SUCCESS: Code quality and security checks passed.'
+            script {
+                echo 'CI SUCCESS: Code quality and security checks passed.'
+
+                def branch = env.GIT_BRANCH ?: env.BRANCH_NAME ?: ''
+                if (branch != 'main' && branch != 'origin/main') {
+                    echo "CD skipped: CI branch is ${branch}, not main."
+                } else {
+                    def backendId = sh(
+                        script: "docker image inspect --format '{{.Id}}' multi-tier-poc/backend:${env.COMMIT_SHA}",
+                        returnStdout: true
+                    ).trim()
+                    def frontendId = sh(
+                        script: "docker image inspect --format '{{.Id}}' multi-tier-poc/frontend:${env.COMMIT_SHA}",
+                        returnStdout: true
+                    ).trim()
+
+                    build job: 'multi-tier-poc-cd', wait: false,
+                        parameters: [
+                            string(name: 'CI_BUILD_NUMBER', value: env.BUILD_NUMBER),
+                            string(name: 'IMAGE_TAG', value: env.COMMIT_SHA),
+                            string(name: 'BACKEND_IMAGE_ID', value: backendId),
+                            string(name: 'FRONTEND_IMAGE_ID', value: frontendId)
+                        ]
+                    echo "Triggered CD for tested commit ${env.COMMIT_SHA}"
+                }
+            }
         }
 
         failure {
