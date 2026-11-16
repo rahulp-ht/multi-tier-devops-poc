@@ -1,0 +1,179 @@
+
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        timeout(time: 90, unit: 'MINUTES')
+        skipDefaultCheckout(true)
+    }
+
+    environment {
+        TRIVY_IMAGE = 'aquasec/trivy@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb'
+        IMAGE_PREFIX = 'multi-tier-poc'
+    }
+
+    stages {
+        stage('SCM Checkout') {
+            steps {
+                checkout scm
+
+                script {
+                    env.COMMIT_SHA = sh(
+                        script: 'git rev-parse HEAD',
+                        returnStdout: true
+                    ).trim()
+
+                    if (!(env.COMMIT_SHA ==~ /^[0-9a-f]{40}$/)) {
+                        error('Invalid Git commit SHA')
+                    }
+
+                    echo "CI commit: ${env.COMMIT_SHA}"
+                }
+            }
+        }
+
+        stage('Validate Source') {
+            steps {
+                sh '''
+                    set -eu
+
+                    test -f sonar-project.properties
+                    test -f backend/Dockerfile
+                    test -f frontend/Dockerfile
+                    test -f backend/server.js
+
+                    docker version
+                    mkdir -p reports/sonarqube reports/trivy
+                '''
+            }
+        }
+
+        stage('SonarQube SAST') {
+            steps {
+                script {
+                    def scannerHome = tool 'SonarScanner-POC'
+
+                    withSonarQubeEnv('SonarQube-POC') {
+                        sh "\"${scannerHome}/bin/sonar-scanner\""
+                    }
+                }
+            }
+        }
+
+        stage('Build Docker Images') {
+            steps {
+                sh '''
+                    set -eu
+
+                    docker build \
+                      -t "$IMAGE_PREFIX/backend:$COMMIT_SHA" \
+                      -t "$IMAGE_PREFIX/backend:latest" \
+                      ./backend
+
+                    docker build \
+                      --build-arg VITE_API_URL=/api \
+                      -t "$IMAGE_PREFIX/frontend:$COMMIT_SHA" \
+                      -t "$IMAGE_PREFIX/frontend:latest" \
+                      ./frontend
+                '''
+            }
+        }
+
+        stage('Trivy Security Reports') {
+            steps {
+                sh '''
+                    set -eu
+
+                    mkdir -p reports/trivy
+
+                    for SERVICE in backend frontend; do
+                        IMAGE="$IMAGE_PREFIX/$SERVICE:$COMMIT_SHA"
+
+                        docker run --rm \
+                          -v /var/run/docker.sock:/var/run/docker.sock \
+                          -v poc-trivy-cache:/root/.cache \
+                          "$TRIVY_IMAGE" image \
+                          --image-src docker \
+                          --scanners vuln \
+                          --severity HIGH,CRITICAL \
+                          --format json "$IMAGE" \
+                          > "reports/trivy/$SERVICE.json"
+
+                        docker run --rm \
+                          -v /var/run/docker.sock:/var/run/docker.sock \
+                          -v poc-trivy-cache:/root/.cache \
+                          "$TRIVY_IMAGE" image \
+                          --image-src docker \
+                          --scanners vuln \
+                          --severity HIGH,CRITICAL \
+                          --format table "$IMAGE" \
+                          > "reports/trivy/$SERVICE.txt"
+                    done
+                '''
+            }
+        }
+
+        stage('Security Quality Gates') {
+            steps {
+                script {
+                    def gate = timeout(time: 15, unit: 'MINUTES') {
+                        waitForQualityGate abortPipeline: false
+                    }
+
+                    writeFile(
+                        file: 'reports/sonarqube/quality-gate.txt',
+                        text: "SonarQube Quality Gate: ${gate.status}\n"
+                    )
+
+                    int trivyStatus = sh(
+                        returnStatus: true,
+                        script: '''
+                            for SERVICE in backend frontend; do
+                                IMAGE="$IMAGE_PREFIX/$SERVICE:$COMMIT_SHA"
+
+                                docker run --rm \
+                                  -v /var/run/docker.sock:/var/run/docker.sock \
+                                  -v poc-trivy-cache:/root/.cache \
+                                  "$TRIVY_IMAGE" image \
+                                  --image-src docker \
+                                  --scanners vuln \
+                                  --severity HIGH,CRITICAL \
+                                  --exit-code 1 "$IMAGE" || exit 1
+                            done
+                        '''
+                    )
+
+                    if (gate.status != 'OK' || trivyStatus != 0) {
+                        error(
+                            "Security checks failed: " +
+                            "SonarQube=${gate.status}, " +
+                            "Trivy=${trivyStatus}"
+                        )
+                    }
+
+                    echo 'SonarQube and Trivy security gates PASSED'
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts(
+                artifacts: 'reports/**/*, .scannerwork/report-task.txt',
+                allowEmptyArchive: true,
+                fingerprint: true
+            )
+        }
+
+        success {
+            echo 'CI SUCCESS: Code quality and security checks passed.'
+        }
+
+        failure {
+            echo 'CI FAILED: Review SonarQube and Trivy reports.'
+        }
+    }
+}
