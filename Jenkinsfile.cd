@@ -38,8 +38,7 @@ pipeline {
                         error('Missing or invalid CI parameters; deployment refused')
                     }
 
-                    // Accept only a direct trigger from the named upstream CI job.
-                    
+                    // Accept only a direct trigger from the named upstream CI job.                  
 def causes = currentBuild.getBuildCauses()
 
 echo "Expected CI job: ${env.CI_JOB_NAME}"
