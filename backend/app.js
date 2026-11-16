@@ -10,12 +10,17 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-db.connect((err) => {
-   if (err) {
-      console.error('Error connecting to MySQL: ' + err.stack);
-      return;
-   }
-   console.log('Connected to MySQL Database');
+db.getConnection((err, connection) => {
+  if (err) {
+    console.error('Database connection failed:', {
+      code: err.code,
+      message: err.message
+    });
+    return;
+  }
+
+  console.log('Database connection successful');
+  connection.release();
 });
 // Health check for AWS Application Load Balancer
 app.get('/health', (req, res) => {
