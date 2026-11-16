@@ -21,18 +21,15 @@ ENV VITE_API_URL=${VITE_API_URL}
 # Compile TypeScript and build production-ready static files
 RUN npm run build
 
-# Stage 2: Serve the React application using Nginx
+# Stage 2: Serve React using Nginx
 FROM nginx:stable-alpine
 
-# Copy custom Nginx configuration to support React Router
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+# Install available security fixes for the vulnerable libxslt package
+RUN apk upgrade --no-cache libxslt
 
-# Copy the generated React build into Nginx
+COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /app/dist /usr/share/nginx/html
 
-# Document the HTTP port used by Nginx
 EXPOSE 80
 
-# Keep Nginx running in the foreground
 CMD ["nginx", "-g", "daemon off;"]
-
