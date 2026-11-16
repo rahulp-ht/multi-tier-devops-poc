@@ -39,14 +39,33 @@ pipeline {
                     }
 
                     // Accept only a direct trigger from the named upstream CI job.
-                    def causes = currentBuild.getBuildCauses('hudson.model.Cause$UpstreamCause')
-                    def fromCI = causes.any { cause ->
-                        cause.upstreamProject == env.CI_JOB_NAME &&
-                        "${cause.upstreamBuild}" == params.CI_BUILD_NUMBER
-                    }
-                    if (!fromCI) {
-                        error('CD must be triggered by the successful upstream CI build')
-                    }
+                    
+def causes = currentBuild.getBuildCauses()
+
+echo "Expected CI job: ${env.CI_JOB_NAME}"
+echo "Expected CI build: ${params.CI_BUILD_NUMBER}"
+echo "Detected upstream causes: ${causes}"
+
+def expectedProject = env.CI_JOB_NAME.trim()
+def expectedBuild = params.CI_BUILD_NUMBER.trim()
+
+def fromCI = causes.any { cause ->
+    String actualProject =
+        (cause.upstreamProject ?: '').toString().trim()
+
+    String actualBuild =
+        (cause.upstreamBuild ?: '').toString().trim()
+
+    String actualJobName = actualProject.tokenize('/').last()
+
+    actualJobName == expectedProject &&
+    actualBuild == expectedBuild
+}
+
+if (!fromCI) {
+    error('CD must be triggered by the successful upstream CI build')
+}
+
 
                     echo "Deploying tested commit ${params.IMAGE_TAG} from CI #${params.CI_BUILD_NUMBER}"
                 }
