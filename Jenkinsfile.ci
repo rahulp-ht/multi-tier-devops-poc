@@ -1,3 +1,4 @@
+
 pipeline {
     agent any
 
@@ -14,6 +15,7 @@ pipeline {
     }
 
     stages {
+
         stage('SCM Checkout') {
             steps {
                 checkout scm
@@ -28,7 +30,11 @@ pipeline {
                         error('Invalid Git commit SHA')
                     }
 
+                    // Unique tag for every CI build
+                    env.IMAGE_TAG = "${env.COMMIT_SHA}-${env.BUILD_NUMBER}"
+
                     echo "CI commit: ${env.COMMIT_SHA}"
+                    echo "Unique image tag: ${env.IMAGE_TAG}"
                 }
             }
         }
@@ -67,13 +73,13 @@ pipeline {
                     set -eu
 
                     docker build \
-                      -t "$IMAGE_PREFIX/backend:$COMMIT_SHA" \
+                      -t "$IMAGE_PREFIX/backend:$IMAGE_TAG" \
                       -t "$IMAGE_PREFIX/backend:latest" \
                       ./backend
 
                     docker build \
                       --build-arg VITE_API_URL=/api \
-                      -t "$IMAGE_PREFIX/frontend:$COMMIT_SHA" \
+                      -t "$IMAGE_PREFIX/frontend:$IMAGE_TAG" \
                       -t "$IMAGE_PREFIX/frontend:latest" \
                       ./frontend
                 '''
@@ -88,7 +94,9 @@ pipeline {
                     mkdir -p reports/trivy
 
                     for SERVICE in backend frontend; do
-                        IMAGE="$IMAGE_PREFIX/$SERVICE:$COMMIT_SHA"
+                        IMAGE="$IMAGE_PREFIX/$SERVICE:$IMAGE_TAG"
+
+                        echo "Scanning $IMAGE"
 
                         docker run --rm \
                           -v /var/run/docker.sock:/var/run/docker.sock \
@@ -129,8 +137,10 @@ pipeline {
                     int trivyStatus = sh(
                         returnStatus: true,
                         script: '''
+                            set -eu
+
                             for SERVICE in backend frontend; do
-                                IMAGE="$IMAGE_PREFIX/$SERVICE:$COMMIT_SHA"
+                                IMAGE="$IMAGE_PREFIX/$SERVICE:$IMAGE_TAG"
 
                                 docker run --rm \
                                   -v /var/run/docker.sock:/var/run/docker.sock \
@@ -139,7 +149,7 @@ pipeline {
                                   --image-src docker \
                                   --scanners vuln \
                                   --severity HIGH,CRITICAL \
-                                  --exit-code 1 "$IMAGE" || exit 1
+                                  --exit-code 1 "$IMAGE"
                             done
                         '''
                     )
@@ -159,6 +169,7 @@ pipeline {
     }
 
     post {
+
         always {
             archiveArtifacts(
                 artifacts: 'reports/**/*, .scannerwork/report-task.txt',
@@ -171,37 +182,87 @@ pipeline {
             script {
                 echo 'CI SUCCESS: Code quality and security checks passed.'
 
-                // BRANCH_NAME is often empty in a regular Pipeline-from-SCM job.
-                // Fall back to the Git SCM branch specification configured in Jenkins.
-                def branch = (env.BRANCH_NAME ?: env.GIT_BRANCH ?: '').trim()
-                if (!branch) {
-                    def branchSpecs = scm.branches.collect { it.name }
-                    branch = branchSpecs.size() == 1 ? branchSpecs[0] : ''
+                // Resolve the actual branch
+                def branchCandidates = []
+
+                if (env.BRANCH_NAME?.trim()) {
+                    branchCandidates << env.BRANCH_NAME.trim()
                 }
-                echo "CI branch resolved as: ${branch ?: '(unknown)'}"
 
-                def mainBranches = ['main', 'origin/main', '*/main',
-                                    'refs/heads/main', 'refs/remotes/origin/main']
-                if (!mainBranches.contains(branch)) {
-                    echo "CD skipped: branch ${branch ?: '(unknown)'} is not main."
+                if (env.GIT_BRANCH?.trim()) {
+                    branchCandidates << env.GIT_BRANCH.trim()
+                }
+
+                try {
+                    branchCandidates.addAll(
+                        scm.branches.collect { it.name }
+                    )
+                } catch (Exception ignored) {
+                    echo 'Could not read configured SCM branch.'
+                }
+
+                // Normalize branch names
+                def normalizedBranches = branchCandidates.collect {
+                    it.trim()
+                        .replaceFirst(/^refs\/heads\//, '')
+                        .replaceFirst(/^refs\/remotes\/origin\//, '')
+                        .replaceFirst(/^origin\//, '')
+                        .replaceFirst(/^\*\//, '')
+                }.unique()
+
+                echo "Detected branches: ${normalizedBranches}"
+
+                // CD is permitted only for main
+                if (!normalizedBranches.contains('main')) {
+
+                    echo 'CD skipped: CI build is not from main.'
+
                 } else {
+
+                    echo 'Main branch detected. Preparing CD trigger.'
+
+                    // Verify CI-tested backend image
                     def backendId = sh(
-                        script: "docker image inspect --format '{{.Id}}' multi-tier-poc/backend:${env.COMMIT_SHA}",
-                        returnStdout: true
-                    ).trim()
-                    def frontendId = sh(
-                        script: "docker image inspect --format '{{.Id}}' multi-tier-poc/frontend:${env.COMMIT_SHA}",
+                        script: "docker image inspect --format '{{.Id}}' ${env.IMAGE_PREFIX}/backend:${env.IMAGE_TAG}",
                         returnStdout: true
                     ).trim()
 
-                    build job: 'multi-tier-poc-cd', wait: false,
+                    // Verify CI-tested frontend image
+                    def frontendId = sh(
+                        script: "docker image inspect --format '{{.Id}}' ${env.IMAGE_PREFIX}/frontend:${env.IMAGE_TAG}",
+                        returnStdout: true
+                    ).trim()
+
+                    if (!backendId || !frontendId) {
+                        error('CI-tested Docker image verification failed.')
+                    }
+
+                    echo "Backend image ID: ${backendId}"
+                    echo "Frontend image ID: ${frontendId}"
+
+                    // Trigger downstream CD pipeline
+                    build job: 'multi-tier-poc-cd',
+                        wait: false,
                         parameters: [
-                            string(name: 'CI_BUILD_NUMBER', value: env.BUILD_NUMBER),
-                            string(name: 'IMAGE_TAG', value: env.COMMIT_SHA),
-                            string(name: 'BACKEND_IMAGE_ID', value: backendId),
-                            string(name: 'FRONTEND_IMAGE_ID', value: frontendId)
+                            string(
+                                name: 'CI_BUILD_NUMBER',
+                                value: env.BUILD_NUMBER
+                            ),
+                            string(
+                                name: 'IMAGE_TAG',
+                                value: env.IMAGE_TAG
+                            ),
+                            string(
+                                name: 'BACKEND_IMAGE_ID',
+                                value: backendId
+                            ),
+                            string(
+                                name: 'FRONTEND_IMAGE_ID',
+                                value: frontendId
+                            )
                         ]
-                    echo "Triggered CD for tested commit ${env.COMMIT_SHA}"
+
+                    echo "Triggered CD for ${env.IMAGE_TAG}"
                 }
             }
         }
