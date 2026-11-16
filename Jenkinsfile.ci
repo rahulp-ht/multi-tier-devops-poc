@@ -171,9 +171,19 @@ pipeline {
             script {
                 echo 'CI SUCCESS: Code quality and security checks passed.'
 
-                def branch = env.GIT_BRANCH ?: env.BRANCH_NAME ?: ''
-                if (branch != 'main' && branch != 'origin/main') {
-                    echo "CD skipped: CI branch is ${branch}, not main."
+                // BRANCH_NAME is often empty in a regular Pipeline-from-SCM job.
+                // Fall back to the Git SCM branch specification configured in Jenkins.
+                def branch = (env.BRANCH_NAME ?: env.GIT_BRANCH ?: '').trim()
+                if (!branch) {
+                    def branchSpecs = scm.branches.collect { it.name }
+                    branch = branchSpecs.size() == 1 ? branchSpecs[0] : ''
+                }
+                echo "CI branch resolved as: ${branch ?: '(unknown)'}"
+
+                def mainBranches = ['main', 'origin/main', '*/main',
+                                    'refs/heads/main', 'refs/remotes/origin/main']
+                if (!mainBranches.contains(branch)) {
+                    echo "CD skipped: branch ${branch ?: '(unknown)'} is not main."
                 } else {
                     def backendId = sh(
                         script: "docker image inspect --format '{{.Id}}' multi-tier-poc/backend:${env.COMMIT_SHA}",
