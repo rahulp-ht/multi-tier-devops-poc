@@ -1,4 +1,6 @@
+
 import groovy.json.JsonOutput
+
 pipeline {
     agent any
 
@@ -10,94 +12,152 @@ pipeline {
     }
 
     parameters {
-        string(name: 'CI_BUILD_NUMBER', defaultValue: '', description: 'Successful upstream CI build number')
-        string(name: 'IMAGE_TAG', defaultValue: '', description: '40-character Git commit SHA tested by CI')
-        string(name: 'BACKEND_IMAGE_ID', defaultValue: '', description: 'CI-tested backend Docker image ID (sha256:...)')
-        string(name: 'FRONTEND_IMAGE_ID', defaultValue: '', description: 'CI-tested frontend Docker image ID (sha256:...)')
+        string(
+            name: 'CI_BUILD_NUMBER',
+            defaultValue: '',
+            description: 'Successful upstream CI build number'
+        )
+        string(
+            name: 'IMAGE_TAG',
+            defaultValue: '',
+            description: 'Unique CI image tag: COMMIT_SHA-BUILD_NUMBER'
+        )
+        string(
+            name: 'BACKEND_IMAGE_ID',
+            defaultValue: '',
+            description: 'CI-tested backend Docker image ID'
+        )
+        string(
+            name: 'FRONTEND_IMAGE_ID',
+            defaultValue: '',
+            description: 'CI-tested frontend Docker image ID'
+        )
     }
 
     environment {
-        AWS_REGION    = 'ap-south-1'
+        AWS_REGION     = 'ap-south-1'
         AWS_ACCOUNT_ID = '809554586055'
-        AWS_REGISTRY  = '809554586055.dkr.ecr.ap-south-1.amazonaws.com'
-        ECR_PREFIX    = 'multi-tier-poc'
-        ECS_CLUSTER   = 'multi-tier-poc-cluster'
-        CI_JOB_NAME   = 'multi-tier-poc-ci'
-        AWS_CLI_IMAGE = 'public.ecr.aws/aws-cli/aws-cli:latest'
+        AWS_REGISTRY   = '809554586055.dkr.ecr.ap-south-1.amazonaws.com'
+        ECR_PREFIX     = 'multi-tier-poc'
+        ECS_CLUSTER    = 'multi-tier-poc-cluster'
+        CI_JOB_NAME    = 'multi-tier-poc-ci'
+        AWS_CLI_IMAGE  = 'public.ecr.aws/aws-cli/aws-cli:latest'
     }
 
     stages {
+
+        // --------------------------------------------------
+        // 1. VERIFY UPSTREAM CI
+        // --------------------------------------------------
+
         stage('Verify Successful CI Build') {
             steps {
                 script {
-                    if (!(params.CI_BUILD_NUMBER ==~ /^[0-9]+$/) ||
-                        !(params.IMAGE_TAG ==~ /^[0-9a-f]{40}$/) ||
-                        !(params.BACKEND_IMAGE_ID ==~ /^sha256:[0-9a-f]{64}$/) ||
-                        !(params.FRONTEND_IMAGE_ID ==~ /^sha256:[0-9a-f]{64}$/)) {
+                    def ciBuildNumber =
+                        (params.CI_BUILD_NUMBER ?: '').toString().trim()
+
+                    def imageTag =
+                        (params.IMAGE_TAG ?: '').toString().trim()
+
+                    def backendImageId =
+                        (params.BACKEND_IMAGE_ID ?: '').toString().trim()
+
+                    def frontendImageId =
+                        (params.FRONTEND_IMAGE_ID ?: '').toString().trim()
+
+                    // Validate unique tag: 40-character SHA + build number
+                    def validTag =
+                        imageTag ==~ /^[0-9a-f]{40}-[1-9][0-9]*$/
+
+                    def tagBuildNumber =
+                        validTag ? imageTag.substring(41) : ''
+
+                    if (!(ciBuildNumber ==~ /^[1-9][0-9]*$/) ||
+                        !validTag ||
+                        tagBuildNumber != ciBuildNumber ||
+                        !(backendImageId ==~ /^sha256:[0-9a-f]{64}$/) ||
+                        !(frontendImageId ==~ /^sha256:[0-9a-f]{64}$/)) {
+
                         error('Missing or invalid CI parameters; deployment refused')
                     }
 
-                    // Accept only a direct trigger from the named upstream CI job.
-def causes = currentBuild.getBuildCauses()
+                    // Verify direct trigger from upstream CI job
+                    def causes = currentBuild.getBuildCauses()
 
-echo "Expected CI job: ${env.CI_JOB_NAME}"
-echo "Expected CI build: ${params.CI_BUILD_NUMBER}"
-echo "Detected upstream causes: ${causes}"
+                    echo "Expected CI job: ${env.CI_JOB_NAME}"
+                    echo "Expected CI build: ${ciBuildNumber}"
+                    echo "Detected upstream causes: ${causes}"
 
-def expectedProject = env.CI_JOB_NAME.trim()
-def expectedBuild = params.CI_BUILD_NUMBER.trim()
+                    def expectedProject = env.CI_JOB_NAME.trim()
 
-def fromCI = causes.any { cause ->
-    String actualProject =
-        (cause.upstreamProject ?: '').toString().trim()
+                    def fromCI = causes.any { cause ->
 
-    String actualBuild =
-        (cause.upstreamBuild ?: '').toString().trim()
+                        String actualProject =
+                            (cause.upstreamProject ?: '').toString().trim()
 
-    String actualJobName = actualProject.tokenize('/').last()
+                        String actualBuild =
+                            (cause.upstreamBuild ?: '').toString().trim()
 
-    actualJobName == expectedProject &&
-    actualBuild == expectedBuild
-}
+                        String actualJobName = actualProject ?
+                            actualProject.tokenize('/').last() : ''
 
-if (!fromCI) {
-    error('CD must be triggered by the successful upstream CI build')
-}
+                        actualJobName == expectedProject &&
+                        actualBuild == ciBuildNumber
+                    }
 
+                    if (!fromCI) {
+                        error(
+                            'CD must be triggered by the successful upstream CI build'
+                        )
+                    }
 
-                    echo "Deploying tested commit ${params.IMAGE_TAG} from CI #${params.CI_BUILD_NUMBER}"
+                    echo "CI verification PASSED"
+                    echo "Deploying image: ${imageTag}"
                 }
 
+                // Verify the exact images produced by CI
                 sh '''
                     set -eu
+
                     docker version >/dev/null
 
                     for SERVICE in backend frontend; do
+
                         SOURCE="$ECR_PREFIX/$SERVICE:$IMAGE_TAG"
+
                         case "$SERVICE" in
                             backend) EXPECTED="$BACKEND_IMAGE_ID" ;;
                             frontend) EXPECTED="$FRONTEND_IMAGE_ID" ;;
                         esac
 
-                        ACTUAL="$(docker image inspect --format '{{.Id}}' "$SOURCE")" || {
+                        ACTUAL="$(docker image inspect \
+                            --format '{{.Id}}' "$SOURCE")" || {
                             echo "Missing CI-tested image: $SOURCE"
-                            echo 'Rerun CI; CD deliberately does not rebuild images.'
                             exit 1
                         }
+
                         if [ "$ACTUAL" != "$EXPECTED" ]; then
-                            echo "Image ID mismatch for $SOURCE; deployment refused"
+                            echo "Image ID mismatch: $SOURCE"
                             exit 1
                         fi
-                        echo "Verified CI-tested image: $SOURCE ($ACTUAL)"
+
+                        echo "Verified: $SOURCE"
+                        echo "Image ID: $ACTUAL"
+
                     done
                 '''
             }
         }
 
+        // --------------------------------------------------
+        // 2. PREPARE AWS CLI
+        // --------------------------------------------------
+
         stage('Prepare AWS CLI') {
             steps {
                 writeFile file: 'aws-cli.sh', text: '''#!/bin/sh
 set -eu
+
 exec docker run --rm \\
   -e AWS_ACCESS_KEY_ID \\
   -e AWS_SECRET_ACCESS_KEY \\
@@ -105,9 +165,14 @@ exec docker run --rm \\
   -e AWS_DEFAULT_REGION="$AWS_REGION" \\
   "$AWS_CLI_IMAGE" "$@"
 '''
+
                 sh 'chmod 700 aws-cli.sh'
             }
         }
+
+        // --------------------------------------------------
+        // 3. PUSH TESTED IMAGES TO ECR
+        // --------------------------------------------------
 
         stage('Push Tested Images to ECR') {
             steps {
@@ -117,22 +182,32 @@ exec docker run --rm \\
                     accessKeyVariable: 'AWS_ACCESS_KEY_ID',
                     secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
                 ]]) {
+
                     sh '''
                         set -eu
                         set +x
 
                         DOCKER_CONFIG="$(mktemp -d)"
                         export DOCKER_CONFIG
+
                         trap 'rm -rf "$DOCKER_CONFIG"' EXIT
 
+                        # Verify AWS account
                         ./aws-cli.sh sts get-caller-identity \\
-                          --query Account --output text | grep -Fx "$AWS_ACCOUNT_ID"
+                          --query Account --output text |
+                          grep -Fx "$AWS_ACCOUNT_ID"
 
-                        ./aws-cli.sh ecr get-login-password --region "$AWS_REGION" |
-                          docker login --username AWS --password-stdin "$AWS_REGISTRY"
+                        # Authenticate with ECR
+                        ./aws-cli.sh ecr get-login-password \\
+                          --region "$AWS_REGION" |
+                          docker login \\
+                            --username AWS \\
+                            --password-stdin "$AWS_REGISTRY"
 
                         : > ecr-images.properties
+
                         for SERVICE in backend frontend; do
+
                             REPOSITORY="$ECR_PREFIX/$SERVICE"
                             SOURCE="$REPOSITORY:$IMAGE_TAG"
                             TARGET="$AWS_REGISTRY/$SOURCE"
@@ -142,37 +217,66 @@ exec docker run --rm \\
                                 frontend) EXPECTED="$FRONTEND_IMAGE_ID" ;;
                             esac
 
+                            # Verify repository exists
                             ./aws-cli.sh ecr describe-repositories \\
                               --repository-names "$REPOSITORY" >/dev/null
 
+                            # Handle existing unique tags safely
                             if ./aws-cli.sh ecr describe-images \\
                                 --repository-name "$REPOSITORY" \\
-                                --image-ids "imageTag=$IMAGE_TAG" >/dev/null 2>&1; then
-                                echo "ECR tag exists; verifying its contents: $TARGET"
+                                --image-ids "imageTag=$IMAGE_TAG" \\
+                                >/dev/null 2>&1; then
+
+                                echo "ECR tag already exists: $TARGET"
+
                                 docker pull "$TARGET"
-                                REMOTE_ID="$(docker image inspect --format '{{.Id}}' "$TARGET")"
+
+                                REMOTE_ID="$(docker image inspect \\
+                                  --format '{{.Id}}' "$TARGET")"
+
                                 if [ "$REMOTE_ID" != "$EXPECTED" ]; then
-                                    echo "ECR tag points to a DIFFERENT image: $TARGET"
+                                    echo "ECR image verification FAILED"
                                     exit 1
                                 fi
+
                             else
+
+                                echo "Pushing tested image: $TARGET"
+
                                 docker tag "$SOURCE" "$TARGET"
                                 docker push "$TARGET"
+
                             fi
 
+                            # Retrieve immutable ECR digest
                             DIGEST="$(./aws-cli.sh ecr describe-images \\
                               --repository-name "$REPOSITORY" \\
                               --image-ids "imageTag=$IMAGE_TAG" \\
-                              --query 'imageDetails[0].imageDigest' --output text)"
-                            echo "$DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$'
-                            printf '%s=%s\n' "$SERVICE" "$AWS_REGISTRY/$REPOSITORY@$DIGEST" \\
+                              --query 'imageDetails[0].imageDigest' \\
+                              --output text)"
+
+                            echo "$DIGEST" |
+                              grep -Eq '^sha256:[0-9a-f]{64}$'
+
+                            # Save approved image digest
+                            printf '%s=%s\\n' \\
+                              "$SERVICE" \\
+                              "$AWS_REGISTRY/$REPOSITORY@$DIGEST" \\
                               >> ecr-images.properties
-                            echo "Approved $SERVICE image digest: $DIGEST"
+
+                            echo "Approved $SERVICE digest: $DIGEST"
+
                         done
+
+                        echo "All CI-tested images verified in ECR"
                     '''
                 }
             }
         }
+
+        // --------------------------------------------------
+        // 4. DEPLOY APPROVED IMAGES TO ECS
+        // --------------------------------------------------
 
         stage('Deploy Approved Digests to ECS') {
             steps {
@@ -182,120 +286,272 @@ exec docker run --rm \\
                     accessKeyVariable: 'AWS_ACCESS_KEY_ID',
                     secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
                 ]]) {
+
                     script {
+
+                        // Read approved ECR image digests
                         def images = [:]
-                        readFile('ecr-images.properties').readLines().each { line ->
-                            def pair = line.split('=', 2)
-                            if (pair.size() == 2) images[pair[0]] = pair[1]
-                        }
 
-                        for (String component in ['backend', 'frontend']) {
-                            String targetImage = images[component]
-                            if (!targetImage || !targetImage.contains('@sha256:')) {
-                                error("Missing approved ECR digest for ${component}")
+                        readFile('ecr-images.properties')
+                            .readLines()
+                            .each { line ->
+
+                                def pair = line.split('=', 2)
+
+                                if (pair.size() == 2) {
+                                    images[pair[0]] = pair[1]
+                                }
                             }
-                            String serviceName = "${env.ECR_PREFIX}-${component}"
-                            echo "Deploying ${serviceName} using ${targetImage}"
 
-                            withEnv(["SERVICE_NAME=${serviceName}", "TARGET_IMAGE=${targetImage}"]) {
+                        // Deploy backend and frontend
+                        for (String component in ['backend', 'frontend']) {
+
+                            String targetImage = images[component] ?: ''
+
+                            if (!targetImage.startsWith(
+                                "${env.AWS_REGISTRY}/${env.ECR_PREFIX}/${component}@sha256:"
+                            ) || !(targetImage ==~ /.*@sha256:[0-9a-f]{64}$/)) {
+
+                                error("Invalid ECR digest for ${component}")
+                            }
+
+                            String serviceName =
+                                "${env.ECR_PREFIX}-${component}"
+
+                            echo "Deploying ECS service: ${serviceName}"
+                            echo "Approved image: ${targetImage}"
+
+                            withEnv([
+                                "SERVICE_NAME=${serviceName}",
+                                "TARGET_IMAGE=${targetImage}"
+                            ]) {
+
+                                // Get current ECS service
                                 def serviceResult = sh(
                                     returnStdout: true,
-                                    script: '''./aws-cli.sh ecs describe-services \\
-                                      --cluster "$ECS_CLUSTER" --services "$SERVICE_NAME" \\
+                                    script: '''./aws-cli.sh ecs describe-services \
+                                      --cluster "$ECS_CLUSTER" \
+                                      --services "$SERVICE_NAME" \
                                       --output json'''
                                 ).trim()
-                                def serviceData = readJSON text: serviceResult, returnPojo: true
-                                if (!serviceData.services || serviceData.services.size() != 1 ||
+
+                                def serviceData = readJSON(
+                                    text: serviceResult,
+                                    returnPojo: true
+                                )
+
+                                if (!serviceData.services ||
+                                    serviceData.services.size() != 1 ||
                                     serviceData.services[0].status != 'ACTIVE' ||
                                     (serviceData.services[0].desiredCount as int) < 1) {
-                                    error("ECS service ${serviceName} is missing, inactive, or scaled to zero")
+
+                                    error(
+                                        "ECS service ${serviceName} is missing, inactive, or scaled to zero"
+                                    )
                                 }
 
-                                String previousTaskArn = serviceData.services[0].taskDefinition
-                                def taskJson = withEnv(["TASK_ARN=${previousTaskArn}"]) {
-                                    sh(returnStdout: true, script: '''./aws-cli.sh ecs describe-task-definition \\
-                                      --task-definition "$TASK_ARN" --include TAGS --output json''').trim()
+                                // Retrieve current task definition
+                                String previousTaskArn =
+                                    serviceData.services[0].taskDefinition
+
+                                def taskJson = withEnv([
+                                    "TASK_ARN=${previousTaskArn}"
+                                ]) {
+
+                                    sh(
+                                        returnStdout: true,
+                                        script: '''./aws-cli.sh ecs describe-task-definition \
+                                          --task-definition "$TASK_ARN" \
+                                          --include TAGS \
+                                          --output json'''
+                                    ).trim()
                                 }
-                                def taskResult = readJSON text: taskJson, returnPojo: true
+
+                                def taskResult = readJSON(
+                                    text: taskJson,
+                                    returnPojo: true
+                                )
+
                                 def oldTask = taskResult.taskDefinition
                                 def containers = oldTask.containerDefinitions
+
+                                // Identify application container
                                 def matches = containers.findAll { c ->
-                                    c.name == component || c.name == serviceName
+                                    c.name == component ||
+                                    c.name == serviceName
                                 }
+
                                 if (matches.size() != 1) {
+
                                     if (containers.size() == 1) {
                                         matches = [containers[0]]
                                     } else {
-                                        error("Cannot identify ${component} container in ${previousTaskArn}")
+                                        error(
+                                            "Cannot identify ${component} container"
+                                        )
                                     }
                                 }
 
+                                String containerName = matches[0].name
+
                                 if (matches[0].image == targetImage) {
-                                    echo "${serviceName} already uses the approved digest; no new revision needed"
+
+                                    echo "${serviceName} already uses approved image"
+
                                 } else {
-                                    // Preserve existing ECS settings; change only the selected image.
+
+                                    // Preserve existing ECS configuration
                                     def allowedFields = [
-                                        'family', 'taskRoleArn', 'executionRoleArn', 'networkMode',
-                                        'containerDefinitions', 'volumes', 'placementConstraints',
-                                        'requiresCompatibilities', 'cpu', 'memory', 'pidMode',
-                                        'ipcMode', 'proxyConfiguration', 'inferenceAccelerators',
-                                        'ephemeralStorage', 'runtimePlatform', 'enableFaultInjection'
+                                        'family',
+                                        'taskRoleArn',
+                                        'executionRoleArn',
+                                        'networkMode',
+                                        'containerDefinitions',
+                                        'volumes',
+                                        'placementConstraints',
+                                        'requiresCompatibilities',
+                                        'cpu',
+                                        'memory',
+                                        'pidMode',
+                                        'ipcMode',
+                                        'proxyConfiguration',
+                                        'inferenceAccelerators',
+                                        'ephemeralStorage',
+                                        'runtimePlatform',
+                                        'enableFaultInjection'
                                     ]
+
                                     def payload = [:]
+
                                     allowedFields.each { key ->
-                                        if (oldTask.containsKey(key) && oldTask[key] != null) {
+
+                                        if (oldTask.containsKey(key) &&
+                                            oldTask[key] != null) {
+
                                             payload[key] = oldTask[key]
                                         }
                                     }
-                                    if (taskResult.tags) payload.tags = taskResult.tags
+
+                                    if (taskResult.tags) {
+                                        payload.tags = taskResult.tags
+                                    }
+
+                                    // Change only the selected image
                                     matches[0].image = targetImage
 
                                     def json = JsonOutput.toJson(payload)
-                                    String newTaskArn = withEnv(["TASK_DEF_JSON=${json}"]) {
-                                        sh(returnStdout: true, script: '''set +x
-                                        ./aws-cli.sh ecs register-task-definition \\
-                                          --cli-input-json "$TASK_DEF_JSON" \\
-                                          --query 'taskDefinition.taskDefinitionArn' --output text''').trim()
-                                    }
-                                    if (!newTaskArn.startsWith('arn:aws:ecs:')) {
-                                        error("Invalid registered task definition ARN: ${newTaskArn}")
+
+                                    // Register new task definition
+                                    String newTaskArn = withEnv([
+                                        "TASK_DEF_JSON=${json}"
+                                    ]) {
+
+                                        sh(
+                                            returnStdout: true,
+                                            script: '''set +x
+                                            ./aws-cli.sh ecs register-task-definition \
+                                              --cli-input-json "$TASK_DEF_JSON" \
+                                              --query 'taskDefinition.taskDefinitionArn' \
+                                              --output text'''
+                                        ).trim()
                                     }
 
-                                    withEnv(["NEW_TASK_ARN=${newTaskArn}"]) {
-                                        sh '''./aws-cli.sh ecs update-service \\
-                                          --cluster "$ECS_CLUSTER" --service "$SERVICE_NAME" \\
-                                          --task-definition "$NEW_TASK_ARN" \\
-                                          --query 'service.taskDefinition' --output text'''
+                                    if (!newTaskArn.startsWith('arn:aws:ecs:')) {
+                                        error(
+                                            "Invalid task definition ARN: ${newTaskArn}"
+                                        )
+                                    }
+
+                                    echo "Registered task definition: ${newTaskArn}"
+
+                                    // Update ECS service
+                                    withEnv([
+                                        "NEW_TASK_ARN=${newTaskArn}"
+                                    ]) {
+
+                                        sh '''./aws-cli.sh ecs update-service \
+                                          --cluster "$ECS_CLUSTER" \
+                                          --service "$SERVICE_NAME" \
+                                          --task-definition "$NEW_TASK_ARN" \
+                                          --query 'service.taskDefinition' \
+                                          --output text'''
                                     }
                                 }
+
+                                // Wait for ECS deployment
+                                echo "Waiting for ECS service stability..."
 
                                 sh '''
-                                    ./aws-cli.sh ecs wait services-stable \\
-                                      --cluster "$ECS_CLUSTER" --services "$SERVICE_NAME"
+                                    ./aws-cli.sh ecs wait services-stable \
+                                      --cluster "$ECS_CLUSTER" \
+                                      --services "$SERVICE_NAME"
                                 '''
 
-                                def afterJson = sh(returnStdout: true, script: '''./aws-cli.sh ecs describe-services \\
-                                  --cluster "$ECS_CLUSTER" --services "$SERVICE_NAME" \\
-                                  --output json''').trim()
-                                def afterData = readJSON text: afterJson, returnPojo: true
-                                def after = afterData.services[0]
-                                if ((after.runningCount as int) != (after.desiredCount as int) ||
-                                    (after.desiredCount as int) < 1) {
-                                    error("${serviceName} did not reach its desired running count")
+                                // Verify final ECS service state
+                                def afterJson = sh(
+                                    returnStdout: true,
+                                    script: '''./aws-cli.sh ecs describe-services \
+                                      --cluster "$ECS_CLUSTER" \
+                                      --services "$SERVICE_NAME" \
+                                      --output json'''
+                                ).trim()
+
+                                def afterData = readJSON(
+                                    text: afterJson,
+                                    returnPojo: true
+                                )
+
+                                if (!afterData.services ||
+                                    afterData.services.size() != 1) {
+
+                                    error("Cannot verify ECS service ${serviceName}")
                                 }
 
-                                def deployedTaskJson = withEnv(["TASK_ARN=${after.taskDefinition}"]) {
-                                    sh(returnStdout: true, script: '''./aws-cli.sh ecs describe-task-definition \\
-                                      --task-definition "$TASK_ARN" --output json''').trim()
+                                def after = afterData.services[0]
+
+                                if (after.status != 'ACTIVE' ||
+                                    (after.runningCount as int) !=
+                                    (after.desiredCount as int) ||
+                                    (after.desiredCount as int) < 1) {
+
+                                    error(
+                                        "${serviceName} did not reach desired running count"
+                                    )
                                 }
-                                def deployedTaskData = readJSON text: deployedTaskJson, returnPojo: true
-                                def deployedContainers = deployedTaskData.taskDefinition.containerDefinitions
+
+                                // Verify deployed task definition image digest
+                                def deployedTaskJson = withEnv([
+                                    "TASK_ARN=${after.taskDefinition}"
+                                ]) {
+
+                                    sh(
+                                        returnStdout: true,
+                                        script: '''./aws-cli.sh ecs describe-task-definition \
+                                          --task-definition "$TASK_ARN" \
+                                          --output json'''
+                                    ).trim()
+                                }
+
+                                def deployedTaskData = readJSON(
+                                    text: deployedTaskJson,
+                                    returnPojo: true
+                                )
+
+                                def deployedContainers =
+                                    deployedTaskData.taskDefinition.containerDefinitions
+
                                 if (!deployedContainers.any { c ->
-                                    (c.name == matches[0].name) && c.image == targetImage
+                                    c.name == containerName &&
+                                    c.image == targetImage
                                 }) {
-                                    error("ECS image digest verification FAILED for ${serviceName}")
+
+                                    error(
+                                        "ECS image digest verification FAILED: ${serviceName}"
+                                    )
                                 }
-                                echo "ECS stable and digest verified: ${serviceName}"
+
+                                echo "ECS deployment VERIFIED: ${serviceName}"
+                                echo "Running image: ${targetImage}"
                             }
                         }
                     }
@@ -304,15 +560,36 @@ exec docker run --rm \\
         }
     }
 
+    // --------------------------------------------------
+    // PIPELINE RESULTS
+    // --------------------------------------------------
+
     post {
+
         success {
-            echo "CD SUCCESS: ECS deployed images from CI #${params.CI_BUILD_NUMBER} (${params.IMAGE_TAG})"
+            echo """
+            ==========================================
+            CD SUCCESS
+            ==========================================
+            CI Build: ${params.CI_BUILD_NUMBER}
+            Image Tag: ${params.IMAGE_TAG}
+            ECS Cluster: ${env.ECS_CLUSTER}
+            Services: backend, frontend
+            Status: DEPLOYMENT VERIFIED
+            ==========================================
+            """
         }
+
         failure {
             echo 'CD FAILED: Review image verification, ECR, and ECS stages.'
         }
+
         always {
-            archiveArtifacts artifacts: 'ecr-images.properties', allowEmptyArchive: true, fingerprint: true
+            archiveArtifacts(
+                artifacts: 'ecr-images.properties',
+                allowEmptyArchive: true,
+                fingerprint: true
+            )
         }
     }
 }
