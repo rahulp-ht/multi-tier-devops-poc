@@ -7,7 +7,7 @@ pipeline {
     options {
         timestamps()
         disableConcurrentBuilds()
-        timeout(time: 60, unit: 'MINUTES')
+        timeout(time: 90, unit: 'MINUTES')
         skipDefaultCheckout(true)
     }
 
@@ -283,7 +283,34 @@ stage('Prepare Rolling Deployment Capacity') {
         ]]) {
             sh '''
                 set -eu
+# Record original ECS instances before scale-out
+ARNS="$(./aws-cli.sh ecs list-container-instances \
+  --cluster "$ECS_CLUSTER" \
+  --status ACTIVE \
+  --query 'containerInstanceArns' \
+  --output text)"
 
+if [ -z "$ARNS" ] || [ "$ARNS" = "None" ]; then
+    echo "ERROR: No active ECS container instances"
+    exit 1
+fi
+
+./aws-cli.sh ecs describe-container-instances \
+  --cluster "$ECS_CLUSTER" \
+  --container-instances $ARNS \
+  --query 'containerInstances[?agentConnected==`true` && status==`ACTIVE`].ec2InstanceId' \
+  --output text |
+  tr '\t' '\n' |
+  sed '/^$/d' |
+  sort -u > ecs-baseline-ec2-${BUILD_NUMBER}.txt
+
+if [ "$(wc -l < ecs-baseline-ec2-${BUILD_NUMBER}.txt)" -ne 2 ]; then
+    echo "ERROR: Expected exactly 2 baseline ECS instances"
+    exit 1
+fi
+
+echo "Original EC2 instances recorded:"
+cat ecs-baseline-ec2-${BUILD_NUMBER}.txt
                 ./aws-cli.sh autoscaling update-auto-scaling-group \
                   --auto-scaling-group-name multi-tier-poc-ecs-asg \
                   --min-size 3 \
@@ -522,15 +549,38 @@ stage('Prepare Rolling Deployment Capacity') {
                                     }
                                 }
 
-                                // Wait for ECS deployment
-                                echo "Waiting for ECS service stability..."
+// Wait up to 25 minutes for ECS deployment stability
+echo "Waiting for ECS service stability..."
 
-                                sh '''
-                                    ./aws-cli.sh ecs wait services-stable \
-                                      --cluster "$ECS_CLUSTER" \
-                                      --services "$SERVICE_NAME"
-                                '''
+sh '''
+    set -eu
 
+    for attempt in $(seq 1 75); do
+        STATE="$(./aws-cli.sh ecs describe-services \
+          --cluster "$ECS_CLUSTER" \
+          --services "$SERVICE_NAME" \
+          --query 'services[0].[status,desiredCount,runningCount,pendingCount,length(deployments),deployments[0].rolloutState]' \
+          --output text)"
+
+        echo "ECS status: $STATE"
+        set -- $STATE
+
+        if [ "$1" = "ACTIVE" ] &&
+           [ "$2" -gt 0 ] &&
+           [ "$3" -eq "$2" ] &&
+           [ "$4" -eq 0 ] &&
+           [ "$5" -eq 1 ] &&
+           [ "$6" = "COMPLETED" ]; then
+            echo "ECS service stable"
+            exit 0
+        fi
+
+        sleep 20
+    done
+
+    echo "ERROR: ECS deployment did not stabilize within 25 minutes"
+    exit 1
+'''
                                 // Verify final ECS service state
                                 def afterJson = sh(
                                     returnStdout: true,
@@ -627,13 +677,26 @@ stage('Prepare Rolling Deployment Capacity') {
         failure {
             echo 'CD FAILED: Review image verification, ECR, and ECS stages.'
         }
+always {
+    archiveArtifacts(
+        artifacts: 'ecr-images.properties',
+        allowEmptyArchive: true,
+        fingerprint: true
+    )
 
-        always {
-            archiveArtifacts(
-                artifacts: 'ecr-images.properties',
-                allowEmptyArchive: true,
-                fingerprint: true
-            )
-        }
+    echo 'Starting safe ECS capacity cleanup...'
+
+    withCredentials([[
+        $class: 'AmazonWebServicesCredentialsBinding',
+        credentialsId: 'aws-ecr-credentials',
+        accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+        secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
+    ]]) {
+        sh '''
+            set -eu
+            bash scripts/cleanup-ecs-capacity.sh
+        '''
+    }
+}
     }
 }
