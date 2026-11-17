@@ -15,7 +15,7 @@ resource "aws_ecs_service" "frontend" {
   name            = "${var.project_name}-frontend"
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.frontend[0].arn
-  desired_count   = 1
+  desired_count   = 2
   # Cost-optimized deployment: stop the old task before starting a replacement
 
   capacity_provider_strategy {
@@ -24,7 +24,7 @@ resource "aws_ecs_service" "frontend" {
   }
 
   network_configuration {
-    subnets          = [aws_subnet.private[0].id]
+    subnets          = aws_subnet.private[*].id
     security_groups  = [aws_security_group.ecs_frontend.id]
     assign_public_ip = false
   }
@@ -42,6 +42,15 @@ resource "aws_ecs_service" "frontend" {
   lifecycle {
     ignore_changes = [task_definition]
   }
+
+  ordered_placement_strategy {
+    type  = "spread"
+    field = "attribute:ecs.availability-zone"
+  }
+
+  placement_constraints {
+    type = "distinctInstance"
+  }
 }
 
 resource "aws_ecs_service" "backend" {
@@ -57,7 +66,7 @@ resource "aws_ecs_service" "backend" {
   name            = "${var.project_name}-backend"
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.backend[0].arn
-  desired_count   = 1
+  desired_count   = 2
   # Cost-optimized deployment: stop the old task before starting a replacement
 
   capacity_provider_strategy {
@@ -69,7 +78,7 @@ resource "aws_ecs_service" "backend" {
   }
 
   network_configuration {
-    subnets          = [aws_subnet.private[0].id]
+    subnets          = aws_subnet.private[*].id
     security_groups  = [aws_security_group.ecs_backend.id]
     assign_public_ip = false
   }
@@ -86,4 +95,13 @@ resource "aws_ecs_service" "backend" {
     aws_ecs_cluster_capacity_providers.main,
     aws_iam_role_policy.ecs_rds_secret
   ]
+
+  ordered_placement_strategy {
+    type  = "spread"
+    field = "attribute:ecs.availability-zone"
+  }
+
+  placement_constraints {
+    type = "distinctInstance"
+  }
 }

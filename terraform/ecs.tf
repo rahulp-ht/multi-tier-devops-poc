@@ -73,10 +73,10 @@ resource "aws_autoscaling_group" "ecs" {
 
   name             = "${var.project_name}-ecs-asg"
   min_size         = 2
-  max_size         = 2
+  max_size         = 4
   desired_capacity = 2
   # Cost-optimized POC: launch ECS hosts in endpoint AZ
-  vpc_zone_identifier = [aws_subnet.private[0].id]
+  vpc_zone_identifier = aws_subnet.private[*].id
   launch_template {
     id      = aws_launch_template.ecs[0].id
     version = "$Latest"
