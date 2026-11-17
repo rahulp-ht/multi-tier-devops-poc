@@ -18,6 +18,11 @@ resource "aws_cloudwatch_log_group" "ecs" {
 }
 
 resource "aws_ecs_task_definition" "frontend" {
+  lifecycle {
+    ignore_changes = [
+      container_definitions
+    ]
+  }
   count = local.ecs_tasks_enabled ? 1 : 0
 
   family                   = "${var.project_name}-frontend"
@@ -57,6 +62,11 @@ resource "aws_ecs_task_definition" "frontend" {
 }
 
 resource "aws_ecs_task_definition" "backend" {
+  lifecycle {
+    ignore_changes = [
+      container_definitions
+    ]
+  }
   count = local.ecs_tasks_enabled ? 1 : 0
 
   family                   = "${var.project_name}-backend"

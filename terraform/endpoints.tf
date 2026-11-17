@@ -44,8 +44,11 @@ resource "aws_vpc_endpoint" "interface" {
   private_dns_enabled = true
 
   # Cost optimization: one endpoint ENI per service in AZ A
-  subnet_ids = [aws_subnet.private[0].id]
-
+  # Deploy endpoint interfaces in both Availability Zones
+  subnet_ids = [
+    aws_subnet.private[0].id, # ap-south-1a
+    aws_subnet.private[1].id  # ap-south-1b
+  ]
   security_group_ids = [
     aws_security_group.vpc_endpoints[0].id
   ]

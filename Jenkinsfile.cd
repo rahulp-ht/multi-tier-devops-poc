@@ -273,7 +273,51 @@ exec docker run --rm \\
                 }
             }
         }
+stage('Prepare Rolling Deployment Capacity') {
+    steps {
+        withCredentials([[
+            $class: 'AmazonWebServicesCredentialsBinding',
+            credentialsId: 'aws-ecr-credentials',
+            accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+            secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
+        ]]) {
+            sh '''
+                set -eu
 
+                ./aws-cli.sh autoscaling update-auto-scaling-group \
+                  --auto-scaling-group-name multi-tier-poc-ecs-asg \
+                  --min-size 3 \
+                  --desired-capacity 3
+
+                for i in $(seq 1 40); do
+                    ARNS="$(./aws-cli.sh ecs list-container-instances \
+                      --cluster "$ECS_CLUSTER" \
+                      --status ACTIVE \
+                      --query 'containerInstanceArns' \
+                      --output text)"
+
+                    if [ -n "$ARNS" ] && [ "$ARNS" != "None" ]; then
+                        READY="$(./aws-cli.sh ecs describe-container-instances \
+                          --cluster "$ECS_CLUSTER" \
+                          --container-instances $ARNS \
+                          --query 'length(containerInstances[?agentConnected==`true` && status==`ACTIVE`])' \
+                          --output text)"
+
+                        if [ "$READY" -ge 3 ]; then
+                            echo "ECS deployment capacity ready"
+                            exit 0
+                        fi
+                    fi
+
+                    sleep 15
+                done
+
+                echo "ECS capacity not ready"
+                exit 1
+            '''
+        }
+    }
+}
         // --------------------------------------------------
         // 4. DEPLOY APPROVED IMAGES TO ECS
         // --------------------------------------------------
