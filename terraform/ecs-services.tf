@@ -3,6 +3,13 @@ locals {
 }
 
 resource "aws_ecs_service" "frontend" {
+  deployment_minimum_healthy_percent = 100
+  deployment_maximum_percent         = 200
+
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
   count = local.ecs_services_enabled ? 1 : 0
 
   name            = "${var.project_name}-frontend"
@@ -10,8 +17,6 @@ resource "aws_ecs_service" "frontend" {
   task_definition = aws_ecs_task_definition.frontend[0].arn
   desired_count   = 1
   # Cost-optimized deployment: stop the old task before starting a replacement
-  deployment_minimum_healthy_percent = 0
-  deployment_maximum_percent         = 100
 
   capacity_provider_strategy {
     capacity_provider = aws_ecs_capacity_provider.ec2[0].name
@@ -40,6 +45,13 @@ resource "aws_ecs_service" "frontend" {
 }
 
 resource "aws_ecs_service" "backend" {
+  deployment_minimum_healthy_percent = 100
+  deployment_maximum_percent         = 200
+
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
   count = local.ecs_services_enabled ? 1 : 0
 
   name            = "${var.project_name}-backend"
@@ -47,8 +59,6 @@ resource "aws_ecs_service" "backend" {
   task_definition = aws_ecs_task_definition.backend[0].arn
   desired_count   = 1
   # Cost-optimized deployment: stop the old task before starting a replacement
-  deployment_minimum_healthy_percent = 0
-  deployment_maximum_percent         = 100
 
   capacity_provider_strategy {
     capacity_provider = aws_ecs_capacity_provider.ec2[0].name
