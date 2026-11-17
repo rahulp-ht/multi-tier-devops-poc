@@ -7,7 +7,7 @@ pipeline {
     options {
         timestamps()
         disableConcurrentBuilds()
-        timeout(time: 90, unit: 'MINUTES')
+        timeout(time: 150, unit: 'MINUTES')
         skipDefaultCheckout(true)
     }
 
@@ -46,6 +46,17 @@ pipeline {
 
     stages {
 
+        stage('Checkout Deployment Scripts') {
+            steps {
+                checkout scm
+                sh '''
+                    set -eu
+                    test -f scripts/cleanup-ecs-capacity.sh
+                    bash -n scripts/cleanup-ecs-capacity.sh
+                    echo "Cleanup script verified"
+                '''
+            }
+        }
         // --------------------------------------------------
         // 1. VERIFY UPSTREAM CI
         // --------------------------------------------------
@@ -273,7 +284,7 @@ exec docker run --rm \\
                 }
             }
         }
-stage('Prepare Rolling Deployment Capacity') {
+   stage('Prepare Rolling Deployment Capacity') {
     steps {
         withCredentials([[
             $class: 'AmazonWebServicesCredentialsBinding',
@@ -283,44 +294,99 @@ stage('Prepare Rolling Deployment Capacity') {
         ]]) {
             sh '''
                 set -eu
-# Record original ECS instances before scale-out
-ARNS="$(./aws-cli.sh ecs list-container-instances \
-  --cluster "$ECS_CLUSTER" \
-  --status ACTIVE \
-  --query 'containerInstanceArns' \
-  --output text)"
+                ASG="multi-tier-poc-ecs-asg"
 
-if [ -z "$ARNS" ] || [ "$ARNS" = "None" ]; then
-    echo "ERROR: No active ECS container instances"
-    exit 1
-fi
+                # Verify normal capacity
+                set -- $(./aws-cli.sh autoscaling describe-auto-scaling-groups \
+                  --auto-scaling-group-names "$ASG" \
+                  --query 'AutoScalingGroups[0].[MinSize,DesiredCapacity,MaxSize,length(Instances)]' \
+                  --output text)
 
-./aws-cli.sh ecs describe-container-instances \
-  --cluster "$ECS_CLUSTER" \
-  --container-instances $ARNS \
-  --query 'containerInstances[?agentConnected==`true` && status==`ACTIVE`].ec2InstanceId' \
-  --output text |
-  tr '\t' '\n' |
-  sed '/^$/d' |
-  sort -u > ecs-baseline-ec2-${BUILD_NUMBER}.txt
+                if [ "$1" -ne 2 ] || [ "$2" -ne 2 ] ||
+                   [ "$3" -ne 4 ] || [ "$4" -ne 2 ]; then
+                    echo "ERROR: Expected Min=2 Desired=2 Max=4 Count=2"
+                    exit 1
+                fi
 
-if [ "$(wc -l < ecs-baseline-ec2-${BUILD_NUMBER}.txt)" -ne 2 ]; then
-    echo "ERROR: Expected exactly 2 baseline ECS instances"
-    exit 1
-fi
+                # Verify one instance in each AZ
+                AZS="$(./aws-cli.sh autoscaling describe-auto-scaling-groups \
+                  --auto-scaling-group-names "$ASG" \
+                  --query 'AutoScalingGroups[0].Instances[].AvailabilityZone' \
+                  --output text | tr '\\t' '\\n' | sort)"
 
-echo "Original EC2 instances recorded:"
-cat ecs-baseline-ec2-${BUILD_NUMBER}.txt
+                EXPECTED="$(printf 'ap-south-1a\\nap-south-1b')"
+                [ "$AZS" = "$EXPECTED" ] || {
+                    echo "ERROR: Expected one EC2 in each AZ"
+                    exit 1
+                }
+
+                # Save original ECS instances for safe cleanup
+                ARNS="$(./aws-cli.sh ecs list-container-instances \
+                  --cluster "$ECS_CLUSTER" \
+                  --status ACTIVE \
+                  --query 'containerInstanceArns[]' \
+                  --output text)"
+
+                [ -n "$ARNS" ] && [ "$ARNS" != "None" ] || exit 1
+
+                ./aws-cli.sh ecs describe-container-instances \
+                  --cluster "$ECS_CLUSTER" \
+                  --container-instances $ARNS \
+                  --query 'containerInstances[?agentConnected==`true` && status==`ACTIVE`].ec2InstanceId' \
+                  --output text |
+                  tr '\\t' '\\n' |
+                  sed '/^$/d' |
+                  sort -u > "ecs-baseline-ec2-${BUILD_NUMBER}.txt"
+
+                [ "$(wc -l < "ecs-baseline-ec2-${BUILD_NUMBER}.txt")" -eq 2 ] || {
+                    echo "ERROR: Expected 2 baseline ECS instances"
+                    exit 1
+                }
+
+                # Refuse to deploy unless both services are already healthy
+                # and configured to start replacements before stopping old tasks.
+                for SERVICE in multi-tier-poc-backend multi-tier-poc-frontend; do
+                    STATE="$(./aws-cli.sh ecs describe-services \
+                      --cluster "$ECS_CLUSTER" \
+                      --services "$SERVICE" \
+                      --query 'services[0].[status,desiredCount,runningCount,pendingCount,length(deployments),deployments[0].rolloutState,deploymentConfiguration.minimumHealthyPercent,deploymentConfiguration.maximumPercent]' \
+                      --output text)"
+                    set -- $STATE
+                    if [ "$1" != ACTIVE ] || [ "$2" -ne 2 ] ||
+                       [ "$3" -ne 2 ] || [ "$4" -ne 0 ] ||
+                       [ "$5" -ne 1 ] || [ "$6" != COMPLETED ] ||
+                       [ "$7" -ne 100 ] || [ "$8" -lt 200 ]; then
+                        echo "ERROR: $SERVICE is not healthy or lacks zero-downtime rolling settings"
+                        exit 1
+                    fi
+
+                    TG="$(./aws-cli.sh ecs describe-services \
+                      --cluster "$ECS_CLUSTER" --services "$SERVICE" \
+                      --query 'services[0].loadBalancers[0].targetGroupArn' \
+                      --output text)"
+                    [ -n "$TG" ] && [ "$TG" != None ] || exit 1
+                    HEALTHY="$(./aws-cli.sh elbv2 describe-target-health \
+                      --target-group-arn "$TG" \
+                      --query 'length(TargetHealthDescriptions[?TargetHealth.State==`healthy`])' \
+                      --output text)"
+                    if [ "$HEALTHY" -lt 2 ]; then
+                        echo "ERROR: $SERVICE has fewer than two healthy ALB targets"
+                        exit 1
+                    fi
+                done
+
+                # Temporarily provision spare deployment capacity
                 ./aws-cli.sh autoscaling update-auto-scaling-group \
-                  --auto-scaling-group-name multi-tier-poc-ecs-asg \
+                  --auto-scaling-group-name "$ASG" \
                   --min-size 3 \
                   --desired-capacity 3
 
+                # Wait for ECS capacity
                 for i in $(seq 1 40); do
                     ARNS="$(./aws-cli.sh ecs list-container-instances \
                       --cluster "$ECS_CLUSTER" \
                       --status ACTIVE \
-                      --query 'containerInstanceArns' \
+                      --query 'containerInstanceArns[]' \
                       --output text)"
 
                     if [ -n "$ARNS" ] && [ "$ARNS" != "None" ]; then
@@ -331,15 +397,14 @@ cat ecs-baseline-ec2-${BUILD_NUMBER}.txt
                           --output text)"
 
                         if [ "$READY" -ge 3 ]; then
-                            echo "ECS deployment capacity ready"
+                            echo "Deployment capacity ready"
                             exit 0
                         fi
                     fi
-
                     sleep 15
                 done
 
-                echo "ECS capacity not ready"
+                echo "ERROR: ECS capacity not ready"
                 exit 1
             '''
         }
@@ -677,26 +742,36 @@ sh '''
         failure {
             echo 'CD FAILED: Review image verification, ECR, and ECS stages.'
         }
-always {
-    archiveArtifacts(
-        artifacts: 'ecr-images.properties',
-        allowEmptyArchive: true,
-        fingerprint: true
-    )
+        always {
+            archiveArtifacts(
+                artifacts: 'ecr-images.properties',
+                allowEmptyArchive: true,
+                fingerprint: true
+            )
 
-    echo 'Starting safe ECS capacity cleanup...'
-
-    withCredentials([[
-        $class: 'AmazonWebServicesCredentialsBinding',
-        credentialsId: 'aws-ecr-credentials',
-        accessKeyVariable: 'AWS_ACCESS_KEY_ID',
-        secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
-    ]]) {
-        sh '''
-            set -eu
-            bash scripts/cleanup-ecs-capacity.sh
-        '''
-    }
-}
+            script {
+                String baseline = "ecs-baseline-ec2-${env.BUILD_NUMBER}.txt"
+                if (fileExists(baseline)) {
+                    if (!fileExists('scripts/cleanup-ecs-capacity.sh') ||
+                        !fileExists('aws-cli.sh')) {
+                        error('Capacity baseline exists but cleanup dependencies are missing; manual AWS cleanup required')
+                    }
+                    echo 'Starting safe ECS capacity cleanup...'
+                    withCredentials([[
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: 'aws-ecr-credentials',
+                        accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+                        secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
+                    ]]) {
+                        sh '''
+                            set -eu
+                            bash scripts/cleanup-ecs-capacity.sh
+                        '''
+                    }
+                } else {
+                    echo 'No deployment capacity baseline; cleanup not needed.'
+                }
+            }
+        }
     }
 }
