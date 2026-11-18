@@ -17,9 +17,11 @@ concurrency:
 
 jobs:
   sonarqube:
-    name: SonarQube SAST and Quality Gate
+    name: Ephemeral SonarQube SAST
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
+    env:
+      SONAR_HOST_URL: http://127.0.0.1:9000
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
@@ -27,50 +29,99 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - name: Verify SonarQube configuration
-        env:
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      - name: Start temporary SonarQube Community server
         run: |
-          if [ -z "$SONAR_HOST_URL" ] || [ -z "$SONAR_TOKEN" ]; then
-            echo "::error::Configure SONAR_HOST_URL and SONAR_TOKEN as GitHub Actions secrets."
+          set -euo pipefail
+          docker run -d --name poc-sonarqube --rm \
+            -p 127.0.0.1:9000:9000 \
+            -e SONAR_ES_BOOTSTRAP_CHECKS_DISABLE=true \
+            sonarqube:community
+          echo "Waiting for temporary SonarQube server..."
+          ready=0
+          for i in $(seq 1 90); do
+            status=$(curl -fsS --max-time 5 "$SONAR_HOST_URL/api/system/status" | jq -r '.status' || true)
+            if [ "$status" = "UP" ]; then ready=1; break; fi
+            sleep 5
+          done
+          if [ "$ready" -ne 1 ]; then
+            docker logs --tail 100 poc-sonarqube
+            echo "::error::SonarQube did not become ready"
             exit 1
           fi
 
-      - name: Run SonarQube analysis
+      - name: Generate temporary SonarQube API token
+        id: auth
+        run: |
+          set -euo pipefail
+          response=$(curl -fsS --retry 3 -u admin:admin \
+            -X POST "$SONAR_HOST_URL/api/user_tokens/generate" \
+            --data-urlencode "name=gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}")
+          token=$(jq -er '.token' <<< "$response")
+          echo "::add-mask::$token"
+          echo "SONAR_TOKEN=$token" >> "$GITHUB_ENV"
+
+      - name: Run SonarQube SAST
         uses: SonarSource/sonarqube-scan-action@v6
         env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
 
-      - name: Check SonarQube quality gate
-        id: quality-gate
-        uses: SonarSource/sonarqube-quality-gate-action@v1.2.0
-        with:
-          scanMetadataReportFile: .scannerwork/report-task.txt
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-
-      - name: Publish SonarQube summary
-        if: always()
-        env:
-          GATE_OUTCOME: ${{ steps.quality-gate.outcome }}
+      - name: Wait for analysis and export reports
+        id: quality_gate
         run: |
+          set -euo pipefail
+          mkdir -p reports/sonarqube
+          cp .scannerwork/report-task.txt reports/sonarqube/report-task.txt
+          task_url=$(sed -n 's/^ceTaskUrl=//p' .scannerwork/report-task.txt)
+          if [ -z "$task_url" ]; then echo "::error::Missing SonarQube task URL"; exit 1; fi
+          completed=0
+          for i in $(seq 1 90); do
+            curl -fsS -H "Authorization: Bearer $SONAR_TOKEN" "$task_url" \
+              -o reports/sonarqube/ce-task.json
+            status=$(jq -r '.task.status' reports/sonarqube/ce-task.json)
+            if [ "$status" = "SUCCESS" ]; then completed=1; break; fi
+            if [ "$status" = "FAILED" ] || [ "$status" = "CANCELED" ]; then
+              echo "::error::SonarQube compute task: $status"; exit 1
+            fi
+            sleep 5
+          done
+          if [ "$completed" -ne 1 ]; then echo "::error::SonarQube analysis timed out"; exit 1; fi
+          analysis_id=$(jq -er '.task.analysisId' reports/sonarqube/ce-task.json)
+          curl -fsS -H "Authorization: Bearer $SONAR_TOKEN" \
+            --get --data-urlencode "analysisId=$analysis_id" \
+            "$SONAR_HOST_URL/api/qualitygates/project_status" \
+            -o reports/sonarqube/quality-gate.json
+          curl -fsS -H "Authorization: Bearer $SONAR_TOKEN" \
+            --get --data-urlencode "componentKeys=multi-tier-devops-poc" \
+            --data-urlencode "metricKeys=bugs,vulnerabilities,code_smells,security_hotspots" \
+            "$SONAR_HOST_URL/api/measures/component" \
+            -o reports/sonarqube/measures.json || true
+          curl -fsS -H "Authorization: Bearer $SONAR_TOKEN" \
+            --get --data-urlencode "componentKeys=multi-tier-devops-poc" \
+            --data-urlencode "ps=500" \
+            "$SONAR_HOST_URL/api/issues/search" \
+            -o reports/sonarqube/issues.json || true
+          gate=$(jq -r '.projectStatus.status' reports/sonarqube/quality-gate.json)
           {
-            echo '## SonarQube SAST'
-            echo "Quality gate step: **$GATE_OUTCOME**"
-            echo 'Review the SonarQube project dashboard for findings and remediation details.'
+            echo "## SonarQube (temporary server)"
+            echo "Quality gate: **$gate**"
+            echo "Detailed JSON reports are attached as workflow artifacts."
           } >> "$GITHUB_STEP_SUMMARY"
+          echo "$gate" > reports/sonarqube/quality-gate.txt
+          if [ "$gate" != "OK" ]; then echo "::error::SonarQube quality gate: $gate"; exit 1; fi
 
-      - name: Upload SonarQube scan metadata
+      - name: Upload SonarQube reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: sonarqube-metadata-${{ github.run_id }}
-          path: .scannerwork/report-task.txt
-          if-no-files-found: ignore
+          name: sonarqube-reports-${{ github.run_id }}
+          path: reports/sonarqube/
+          if-no-files-found: warn
           retention-days: 14
+
+      - name: Stop and remove temporary SonarQube
+        if: always()
+        run: docker rm -f poc-sonarqube 2>/dev/null || true
 
   trivy:
     name: Trivy Filesystem Security Scan
