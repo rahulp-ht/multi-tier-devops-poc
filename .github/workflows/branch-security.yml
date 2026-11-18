@@ -1,0 +1,137 @@
+name: Branch Security Scanning
+
+on:
+  push:
+    branches-ignore:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: branch-security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sonarqube:
+    name: SonarQube SAST and Quality Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Verify SonarQube configuration
+        env:
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          if [ -z "$SONAR_HOST_URL" ] || [ -z "$SONAR_TOKEN" ]; then
+            echo "::error::Configure SONAR_HOST_URL and SONAR_TOKEN as GitHub Actions secrets."
+            exit 1
+          fi
+
+      - name: Run SonarQube analysis
+        uses: SonarSource/sonarqube-scan-action@v6
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+      - name: Check SonarQube quality gate
+        id: quality-gate
+        uses: SonarSource/sonarqube-quality-gate-action@v1.2.0
+        with:
+          scanMetadataReportFile: .scannerwork/report-task.txt
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+      - name: Publish SonarQube summary
+        if: always()
+        env:
+          GATE_OUTCOME: ${{ steps.quality-gate.outcome }}
+        run: |
+          {
+            echo '## SonarQube SAST'
+            echo "Quality gate step: **$GATE_OUTCOME**"
+            echo 'Review the SonarQube project dashboard for findings and remediation details.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload SonarQube scan metadata
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sonarqube-metadata-${{ github.run_id }}
+          path: .scannerwork/report-task.txt
+          if-no-files-found: ignore
+          retention-days: 14
+
+  trivy:
+    name: Trivy Filesystem Security Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Prepare report directory
+        run: mkdir -p reports
+
+      - name: Scan source, dependencies, secrets, and IaC
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          format: json
+          output: reports/trivy.json
+          exit-code: '0'
+
+      - name: Generate readable Trivy report
+        if: success()
+        run: |
+          jq -r '
+            ["Target","Type","Severity","Finding"],
+            (.Results[]? as $r
+              | (($r.Vulnerabilities // [])[]? | [$r.Target, "Vulnerability", .Severity, .VulnerabilityID]),
+                (($r.Misconfigurations // [])[]? | select(.Severity == "HIGH" or .Severity == "CRITICAL") | [$r.Target, "Misconfiguration", .Severity, .ID]),
+                (($r.Secrets // [])[]? | select(.Severity == "HIGH" or .Severity == "CRITICAL") | [$r.Target, "Secret", .Severity, .RuleID])
+            ) | @tsv
+          ' reports/trivy.json > reports/trivy.tsv
+
+      - name: Upload Trivy reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-security-reports-${{ github.run_id }}
+          path: reports/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Enforce HIGH and CRITICAL security gate
+        if: success()
+        run: |
+          count=$(jq '[.Results[]? |
+            ((.Vulnerabilities // []) | map(select(.Severity == "HIGH" or .Severity == "CRITICAL")) | length)
+            + ((.Misconfigurations // []) | map(select(.Severity == "HIGH" or .Severity == "CRITICAL")) | length)
+            + ((.Secrets // []) | map(select(.Severity == "HIGH" or .Severity == "CRITICAL")) | length)
+          ] | add // 0' reports/trivy.json)
+          {
+            echo '## Trivy security scan'
+            echo "HIGH/CRITICAL findings: **$count**"
+            echo 'Download the Trivy JSON/TSV reports from workflow artifacts.'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$count" -gt 0 ]; then
+            echo "::error::Trivy detected $count HIGH/CRITICAL findings."
+            exit 1
+          fi
