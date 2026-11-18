@@ -62,9 +62,6 @@ jobs:
 
       - name: Run SonarQube SAST
         uses: SonarSource/sonarqube-scan-action@v6
-        env:
-          SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
 
       - name: Wait for analysis and export reports
         id: quality_gate
