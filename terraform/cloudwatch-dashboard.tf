@@ -65,7 +65,7 @@ locals {
         stat    = "Average"
         period  = 300
         metrics = [
-          ["AWS/EC2", "CPUUtilization", "InstanceId", var.monitoring_ec2_instance_id]
+          ["AWS/EC2", "CPUUtilization", "AutoScalingGroupName", "multi-tier-poc-ecs-asg"]
         ]
       }
     },
