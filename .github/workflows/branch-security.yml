@@ -2,8 +2,8 @@ name: Branch Security Scanning
 
 on:
   push:
-    branches-ignore:
-      - main
+    branches:
+      - '**'
   pull_request:
     branches:
       - main
@@ -21,6 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
+      SONAR_GATE_NAME: CI Overall Code
       SONAR_HOST_URL: http://127.0.0.1:9000
     steps:
       - name: Checkout source
@@ -60,8 +61,30 @@ jobs:
           echo "::add-mask::$token"
           echo "SONAR_TOKEN=$token" >> "$GITHUB_ENV"
 
+      - name: Configure overall-code quality gate
+        run: |
+          set -euo pipefail
+          sonar_post() {
+            local endpoint=$1
+            shift
+            curl -fsS --max-time 30 -H "Authorization: Bearer $SONAR_TOKEN" \
+              -X POST "$SONAR_HOST_URL/api/qualitygates/$endpoint" "$@" >/dev/null
+          }
+          sonar_post create --data-urlencode "name=$SONAR_GATE_NAME"
+          for metric in software_quality_security_rating software_quality_reliability_rating; do
+            sonar_post create_condition \
+              --data-urlencode "gateName=$SONAR_GATE_NAME" \
+              --data-urlencode "metric=$metric" \
+              --data-urlencode "op=GT" \
+              --data-urlencode "error=1"
+          done
+          sonar_post set_as_default --data-urlencode "name=$SONAR_GATE_NAME"
+
       - name: Run SonarQube SAST
         uses: SonarSource/sonarqube-scan-action@v6
+        with:
+          # Analyze each checked-out revision as the temporary project's main branch.
+          args: -Dsonar.projectKey=multi-tier-devops-poc
 
       - name: Wait for analysis and export reports
         id: quality_gate
@@ -89,8 +112,8 @@ jobs:
             "$SONAR_HOST_URL/api/qualitygates/project_status" \
             -o reports/sonarqube/quality-gate.json
           curl -fsS -H "Authorization: Bearer $SONAR_TOKEN" \
-            --get --data-urlencode "componentKeys=multi-tier-devops-poc" \
-            --data-urlencode "metricKeys=bugs,vulnerabilities,code_smells,security_hotspots" \
+            --get --data-urlencode "component=multi-tier-devops-poc" \
+            --data-urlencode "metricKeys=software_quality_security_rating,software_quality_reliability_rating,security_hotspots" \
             "$SONAR_HOST_URL/api/measures/component" \
             -o reports/sonarqube/measures.json || true
           curl -fsS -H "Authorization: Bearer $SONAR_TOKEN" \
@@ -105,7 +128,14 @@ jobs:
             echo "Detailed JSON reports are attached as workflow artifacts."
           } >> "$GITHUB_STEP_SUMMARY"
           echo "$gate" > reports/sonarqube/quality-gate.txt
-          if [ "$gate" != "OK" ]; then echo "::error::SonarQube quality gate: $gate"; exit 1; fi
+          if ! jq -e '
+            .projectStatus | .status == "OK" and
+            ([.conditions[] | select(.status == "OK") | .metricKey] |
+              contains(["software_quality_security_rating", "software_quality_reliability_rating"]))
+          ' reports/sonarqube/quality-gate.json >/dev/null; then
+            echo "::error::SonarQube requires overall security and reliability ratings of A (gate: $gate)"
+            exit 1
+          fi
 
       - name: Upload SonarQube reports
         if: always()
@@ -134,7 +164,7 @@ jobs:
         run: mkdir -p reports
 
       - name: Scan source, dependencies, secrets, and IaC
-        uses: aquasecurity/trivy-action@v0.33.1
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scan-ref: .
@@ -180,5 +210,72 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           if [ "$count" -gt 0 ]; then
             echo "::error::Trivy detected $count HIGH/CRITICAL findings."
+            exit 1
+          fi
+
+  image_scan:
+    name: Build and scan ${{ matrix.image }} image
+    needs: sonarqube
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [backend, frontend]
+    env:
+      IMAGE_NAME: ci/${{ matrix.image }}:${{ github.sha }}
+      APP: ${{ matrix.image }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build application image
+        run: |
+          set -euo pipefail
+          build_args=()
+          if [ "$APP" = "frontend" ]; then
+            build_args+=(--build-arg VITE_API_URL=/api)
+          fi
+          docker build "${build_args[@]}" --tag "$IMAGE_NAME" "./$APP"
+
+      - name: Scan application image with Trivy
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.IMAGE_NAME }}
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          format: json
+          output: trivy-image.json
+          exit-code: '1'
+
+      - name: Upload Trivy image report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-image-${{ matrix.image }}-${{ github.run_id }}
+          path: trivy-image.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  security_gate:
+    name: Security Gate
+    if: always()
+    needs: [sonarqube, trivy, image_scan]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SONAR_RESULT: ${{ needs.sonarqube.result }}
+      FILESYSTEM_RESULT: ${{ needs.trivy.result }}
+      IMAGE_RESULT: ${{ needs.image_scan.result }}
+    steps:
+      - name: Require all scans to pass
+        run: |
+          printf 'SonarQube: %s\nTrivy filesystem: %s\nTrivy images: %s\n' \
+            "$SONAR_RESULT" "$FILESYSTEM_RESULT" "$IMAGE_RESULT"
+          if [[ "$SONAR_RESULT" != success || "$FILESYSTEM_RESULT" != success || "$IMAGE_RESULT" != success ]]; then
+            echo "::error::SonarQube and all Trivy scans must pass"
             exit 1
           fi
