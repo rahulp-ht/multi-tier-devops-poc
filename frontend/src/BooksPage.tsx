@@ -69,8 +69,8 @@ function BooksPage() {
   const [isEdit, setIsEdit] = useState(false);
 
   useEffect(() => {
-    fetchBooks();
-    fetchAuthors();
+    void fetchBooks();
+    void fetchAuthors();
   }, [])
 
   useEffect(() => {
@@ -196,11 +196,11 @@ function BooksPage() {
 
   const bookAddEdit = (book: BookFormDTO) => {
     if (isEdit) {
-      editBook(book);
+      void editBook(book);
       return;
     }
 
-    addBook(book);
+    void addBook(book);
   }
 
   const bookDelete = async () => {

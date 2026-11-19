@@ -60,7 +60,7 @@ function App() {
   const [pieChartData, setPieChartData] = useState<ChartData<"pie">>();
 
   useEffect(() => {
-    fetchBooks();
+    void fetchBooks();
     // fetchAuthors();
   }, [])
 

@@ -62,7 +62,7 @@ function AuthorsPage() {
    const [isEdit, setIsEdit] = useState(false);
 
    useEffect(() => {
-      fetchAuthors();
+      void fetchAuthors();
    }, [])
 
    useEffect(() => {
@@ -164,11 +164,11 @@ function AuthorsPage() {
 
    const authorAddEdit = (author: Author) => {
       if (isEdit) {
-         editAuthor(author);
+         void editAuthor(author);
          return;
       }
 
-      addAuthor(author);
+      void addAuthor(author);
    }
 
    const authorDelete = async () => {

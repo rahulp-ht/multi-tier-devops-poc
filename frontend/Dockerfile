@@ -25,10 +25,16 @@ RUN npm run build
 FROM nginx:stable-alpine
 
 # Install available security fixes for the vulnerable libxslt package
-RUN apk upgrade --no-cache libxslt
+RUN apk upgrade --no-cache libxslt && \
+    apk add --no-cache libcap-setcap && \
+    setcap cap_net_bind_service=+ep /usr/sbin/nginx
+
+COPY nginx.runtime.conf /etc/nginx/nginx.conf
 
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /app/dist /usr/share/nginx/html
+
+USER nginx
 
 EXPOSE 80
 
