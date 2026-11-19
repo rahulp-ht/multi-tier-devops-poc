@@ -16,8 +16,12 @@ resource "aws_db_instance" "mysql" {
 
   identifier = "${var.project_name}-db"
 
-  engine         = "mysql"
-  engine_version = "8.0"
+  engine                      = "mysql"
+  engine_version              = "8.4.11"
+  allow_major_version_upgrade = true
+  apply_immediately           = false
+  parameter_group_name        = "default.mysql8.4"
+  option_group_name           = "default:mysql-8-4"
 
   instance_class    = "db.t3.micro"
   allocated_storage = 20
