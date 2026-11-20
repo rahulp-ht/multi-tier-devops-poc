@@ -36,12 +36,12 @@ resource "aws_security_group" "vpc_endpoints" {
 
 # Private interface endpoints
 resource "aws_vpc_endpoint" "interface" {
-  for_each = var.enable_vpc_endpoints ? local.interface_endpoint_services : toset([])
+  for_each = var.enable_vpc_endpoints ? setsubtract(local.interface_endpoint_services, var.excluded_interface_endpoints) : toset([])
 
   vpc_id              = aws_vpc.main.id
   service_name        = "com.amazonaws.${var.aws_region}.${each.key}"
   vpc_endpoint_type   = "Interface"
-  private_dns_enabled = true
+  private_dns_enabled = !contains(var.interface_endpoints_without_private_dns, each.key)
 
   # Cost optimization: one endpoint ENI per service in AZ A
   # Deploy endpoint interfaces in both Availability Zones
@@ -60,7 +60,7 @@ resource "aws_vpc_endpoint" "interface" {
 
 # S3 Gateway endpoint for ECR image layers
 resource "aws_vpc_endpoint" "s3" {
-  count = var.enable_vpc_endpoints ? 1 : 0
+  count = coalesce(var.enable_s3_gateway_endpoint, var.enable_vpc_endpoints) ? 1 : 0
 
   vpc_id            = aws_vpc.main.id
   service_name      = "com.amazonaws.${var.aws_region}.s3"
