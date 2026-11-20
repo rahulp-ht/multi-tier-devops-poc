@@ -110,12 +110,12 @@ resource "aws_vpc_security_group_egress_rule" "backend_to_rds" {
   to_port                      = 3306
   ip_protocol                  = "tcp"
 }
-# ECS EC2 instances -> AWS service endpoints
+# ECS EC2 instances -> private AWS interface endpoints
 resource "aws_vpc_security_group_egress_rule" "ecs_instance_https" {
   security_group_id = aws_security_group.ecs_instance.id
-  description       = "HTTPS to AWS service endpoints"
+  description       = "HTTPS to private AWS service endpoints"
 
-  cidr_ipv4   = "0.0.0.0/0"
+  cidr_ipv4   = var.vpc_cidr
   from_port   = 443
   to_port     = 443
   ip_protocol = "tcp"
@@ -132,23 +132,23 @@ resource "aws_vpc_security_group_egress_rule" "ecs_instance_s3" {
   ip_protocol    = "tcp"
 }
 
-# Frontend task -> AWS service endpoints
+# Frontend task -> private AWS endpoints
 resource "aws_vpc_security_group_egress_rule" "frontend_https" {
   security_group_id = aws_security_group.ecs_frontend.id
-  description       = "HTTPS to AWS service endpoints"
+  description       = "HTTPS to private AWS service endpoints"
 
-  cidr_ipv4   = "0.0.0.0/0"
+  cidr_ipv4   = var.vpc_cidr
   from_port   = 443
   to_port     = 443
   ip_protocol = "tcp"
 }
 
-# Backend task -> AWS service endpoints
+# Backend task -> private AWS endpoints
 resource "aws_vpc_security_group_egress_rule" "backend_https" {
   security_group_id = aws_security_group.ecs_backend.id
-  description       = "HTTPS to AWS service endpoints"
+  description       = "HTTPS to private AWS service endpoints"
 
-  cidr_ipv4   = "0.0.0.0/0"
+  cidr_ipv4   = var.vpc_cidr
   from_port   = 443
   to_port     = 443
   ip_protocol = "tcp"
