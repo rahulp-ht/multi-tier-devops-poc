@@ -284,7 +284,7 @@ exec docker run --rm \\
                 }
             }
         }
-   stage('Prepare Rolling Deployment Capacity') {
+   stage('Verify and Protect ECS Baseline') {
     steps {
         withCredentials([[
             $class: 'AmazonWebServicesCredentialsBinding',
@@ -296,17 +296,23 @@ exec docker run --rm \\
                 set -eu
                 ASG="multi-tier-poc-ecs-asg"
 
-                # Verify normal capacity
-                set -- $(./aws-cli.sh autoscaling describe-auto-scaling-groups \
-                  --auto-scaling-group-names "$ASG" \
-                  --query 'AutoScalingGroups[0].[MinSize,DesiredCapacity,MaxSize,length(Instances)]' \
-                  --output text)
-
-                if [ "$1" -ne 2 ] || [ "$2" -ne 2 ] ||
-                   [ "$3" -ne 4 ] || [ "$4" -ne 2 ]; then
-                    echo "ERROR: Expected Min=2 Desired=2 Max=4 Count=2"
-                    exit 1
-                fi
+                # Let in-flight Auto Scaling launches or terminations settle.
+                for attempt in $(seq 1 40); do
+                    STATE="$(./aws-cli.sh autoscaling describe-auto-scaling-groups \
+                      --auto-scaling-group-names "$ASG" \
+                      --query 'AutoScalingGroups[0].[MinSize,DesiredCapacity,MaxSize,length(Instances),length(Instances[?LifecycleState==`InService` && HealthStatus==`Healthy`])]' \
+                      --output text)"
+                    set -- $STATE
+                    if [ "$#" -eq 5 ] && [ "$1 $2 $3 $4 $5" = "2 2 4 2 2" ]; then
+                        break
+                    fi
+                    echo "Waiting for two healthy Auto Scaling hosts ($attempt/40): $STATE"
+                    if [ "$attempt" -eq 40 ]; then
+                        echo "ERROR: Expected Min=2 Desired=2 Max=4 Count=2 Healthy=2"
+                        exit 1
+                    fi
+                    sleep 15
+                done
 
                 # Verify one instance in each AZ
                 AZS="$(./aws-cli.sh autoscaling describe-auto-scaling-groups \
@@ -329,19 +335,15 @@ exec docker run --rm \\
 
                 [ -n "$ARNS" ] && [ "$ARNS" != "None" ] || exit 1
 
-                ./aws-cli.sh ecs describe-container-instances \
+                ORIGINAL="$(./aws-cli.sh ecs describe-container-instances \
                   --cluster "$ECS_CLUSTER" \
                   --container-instances $ARNS \
                   --query 'containerInstances[?agentConnected==`true` && status==`ACTIVE`].ec2InstanceId' \
-                  --output text |
-                  tr '\\t' '\\n' |
-                  sed '/^$/d' |
-                  sort -u > "ecs-baseline-ec2-${BUILD_NUMBER}.txt"
-
-                [ "$(wc -l < "ecs-baseline-ec2-${BUILD_NUMBER}.txt")" -eq 2 ] || {
+                  --output text | tr '\\t' '\\n' | sed '/^$/d' | sort -u)"
+                if [ "$(printf '%s\\n' "$ORIGINAL" | grep -c '^i-')" -ne 2 ]; then
                     echo "ERROR: Expected 2 baseline ECS instances"
                     exit 1
-                }
+                fi
 
                 # Refuse to deploy unless both services are already healthy
                 # and configured to start replacements before stopping old tasks.
@@ -375,6 +377,46 @@ exec docker run --rm \\
                     fi
                 done
 
+                BASELINE="ecs-baseline-ec2-${BUILD_NUMBER}.txt"
+                MEMBERS="$(./aws-cli.sh autoscaling describe-auto-scaling-groups \
+                  --auto-scaling-group-names "$ASG" \
+                  --query 'AutoScalingGroups[0].Instances[?LifecycleState==`InService` && HealthStatus==`Healthy`].InstanceId' \
+                  --output text | tr '\\t' '\\n' | sort -u)"
+                if [ "$MEMBERS" != "$ORIGINAL" ]; then
+                    echo "ERROR: Active ECS hosts do not match the two healthy Auto Scaling hosts"
+                    exit 1
+                fi
+
+                ./aws-cli.sh autoscaling set-instance-protection \
+                  --auto-scaling-group-name "$ASG" \
+                  --instance-ids $ORIGINAL --protected-from-scale-in
+
+                PROTECTED="$(./aws-cli.sh autoscaling describe-auto-scaling-groups \
+                  --auto-scaling-group-names "$ASG" \
+                  --query 'AutoScalingGroups[0].Instances[?ProtectedFromScaleIn==`true`].InstanceId' \
+                  --output text | tr '\\t' '\\n' | sort -u)"
+                if [ "$PROTECTED" != "$ORIGINAL" ]; then
+                    echo "ERROR: Could not verify scale-in protection for both baseline hosts"
+                    exit 1
+                fi
+                printf '%s\\n' "$ORIGINAL" > "$BASELINE"
+                echo "Verified and protected both baseline ECS hosts"
+            '''
+        }
+    }
+}
+
+stage('Provision Spare ECS Capacity') {
+    steps {
+        withCredentials([[
+            $class: 'AmazonWebServicesCredentialsBinding',
+            credentialsId: 'aws-ecr-credentials',
+            accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+            secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
+        ]]) {
+            sh '''
+                set -eu
+                ASG="multi-tier-poc-ecs-asg"
                 # Temporarily provision spare deployment capacity
                 ./aws-cli.sh autoscaling update-auto-scaling-group \
                   --auto-scaling-group-name "$ASG" \
@@ -441,6 +483,7 @@ exec docker run --rm \\
 
                         // Deploy backend and frontend
                         for (String component in ['backend', 'frontend']) {
+                            stage(component == 'backend' ? 'Deploy Backend to ECS' : 'Deploy Frontend to ECS') {
 
                             String targetImage = images[component] ?: ''
 
@@ -711,6 +754,7 @@ sh '''
 
                                 echo "ECS deployment VERIFIED: ${serviceName}"
                                 echo "Running image: ${targetImage}"
+                            }
                             }
                         }
                     }
