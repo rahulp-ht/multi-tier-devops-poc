@@ -23,6 +23,30 @@ variable "enable_vpc_endpoints" {
   type        = bool
   default     = false
 }
+variable "enable_s3_gateway_endpoint" {
+  description = "Enable the S3 gateway endpoint independently of interface endpoints"
+  type        = bool
+  default     = null
+}
+
+variable "interface_endpoints_without_private_dns" {
+  description = "Interface endpoint services whose private DNS is disabled for cutover testing"
+  type        = set(string)
+  default     = []
+}
+
+variable "excluded_interface_endpoints" {
+  description = "Interface endpoint services to remove after cutover testing"
+  type        = set(string)
+  default     = []
+}
+
+variable "enable_ecs_public_https_egress" {
+  description = "Allow ECS hosts and tasks to reach public HTTPS endpoints through NAT"
+  type        = bool
+  default     = false
+}
+
 variable "enable_rds" {
   description = "Enable billable Amazon RDS MySQL resources"
   type        = bool
@@ -54,9 +78,9 @@ variable "enable_ecs_services" {
       var.enable_ecs_capacity &&
       var.enable_alb &&
       var.enable_rds &&
-      var.enable_vpc_endpoints
+      (var.enable_vpc_endpoints || var.enable_ecs_public_https_egress)
     )
-    error_message = "ECS services require tasks, EC2 capacity, ALB, RDS and VPC endpoints."
+    error_message = "ECS services require tasks, EC2 capacity, ALB, RDS and either VPC endpoints or public HTTPS egress."
   }
 }
 variable "ecs_image_tag" {
