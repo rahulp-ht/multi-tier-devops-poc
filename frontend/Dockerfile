@@ -24,8 +24,8 @@ RUN npm run build
 # Stage 2: Serve React using Nginx
 FROM nginx:stable-alpine
 
-# Install available security fixes for the vulnerable libxslt package
-RUN apk upgrade --no-cache libxslt && \
+# Install available security fixes for libxslt and libxml2
+RUN apk upgrade --no-cache libxslt libxml2 && \
     apk add --no-cache libcap-setcap && \
     setcap cap_net_bind_service=+ep /usr/sbin/nginx
 
